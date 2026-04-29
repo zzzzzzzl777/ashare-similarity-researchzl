@@ -1,0 +1,81 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ashare-kline-similarity"
+version = "0.1.0"
+description = "A-share K-line similarity retrieval system with offline indexing and local web UI."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [
+  { name = "OpenAI Codex" }
+]
+keywords = ["ashare", "stocks", "kline", "quant", "fastapi", "akshare"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Framework :: FastAPI",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Financial and Insurance Industry",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Office/Business :: Financial :: Investment",
+]
+dependencies = [
+  "akshare>=1.18.56",
+  "duckdb>=1.0.0",
+  "fastapi>=0.115.0",
+  "jinja2>=3.1.0",
+  "numpy>=2.1.0",
+  "orjson>=3.10.0",
+  "pandas>=2.2.0",
+  "polars>=1.9.0",
+  "pyarrow>=16.0.0",
+  "pydantic>=2.8.0",
+  "python-multipart>=0.0.9",
+  "scikit-learn>=1.5.0",
+  "uvicorn>=0.30.0",
+]
+
+[project.optional-dependencies]
+faiss = [
+  "faiss-cpu>=1.13.0",
+]
+gpu = [
+  "torch>=2.5.0",
+  "xgboost>=3.0.0",
+]
+dev = [
+  "build>=1.2.0",
+  "httpx>=0.27.0",
+  "pytest>=8.3.0",
+  "pytest-asyncio>=0.23.0",
+]
+
+[project.scripts]
+ashare-similarity = "ashare_similarity.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+license-files = ["LICENSE"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ashare_similarity = [
+  "templates/*.html",
+  "static/*.css",
+  "static/*.js",
+  "static/vendor/*.js",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-p no:cacheprovider"

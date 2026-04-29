@@ -1,0 +1,127 @@
+name: Bug Report
+description: 报告当前本地工具可复现的问题，并附上 doctor/status 诊断信息
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请优先报告当前项目真实适用的问题：本地运行、回填、索引、搜索、Web、导出、免费数据边界、性能/加速状态。
+
+        提交前建议先运行：
+
+        ```bash
+        python -m ashare_similarity.cli doctor
+        python -m ashare_similarity.cli status --frequency daily
+        ```
+
+        如果命令本身失败，也请直接贴失败输出。
+  - type: dropdown
+    id: area
+    attributes:
+      label: 问题区域
+      description: 选择最接近的问题类别，便于 triage
+      options:
+        - 安装 / 启动
+        - 回填 / 免费数据
+        - 索引 / 构建
+        - 搜索结果 / 相似度
+        - Web / API / 导出
+        - doctor / status / 运维可观测性
+        - 性能 / 加速 / GPU
+        - 其他
+    validations:
+      required: true
+  - type: dropdown
+    id: scope_check
+    attributes:
+      label: 与当前项目的关系
+      description: 帮助判断这是当前仓库问题，还是更偏未来 SaaS 范畴
+      options:
+        - 我认为它与当前本地工具直接相关
+        - 我不确定，可能是免费数据源或网络环境限制
+        - 更像未来 SaaS / 账号 / 公网服务需求
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: 问题描述
+      description: 请简要说明实际发生了什么，以及为什么这对当前项目有影响
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 请写出可以稳定复现的步骤
+      placeholder: |
+        1. 执行命令 ...
+        2. 使用参数 ...
+        3. 打开页面 / 调用接口 ...
+        4. 看到报错 ...
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果 / 报错
+      description: 请粘贴关键报错、traceback、接口响应或异常现象
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 关键参数
+      description: 请写明频段、窗口大小、股票代码、截止日期，以及触发问题的命令或 URL
+      placeholder: |
+        frequency=daily
+        window_size=10
+        symbol=000333
+        end_date=2026-04-23
+        command=python -m ashare_similarity.cli search ...
+  - type: textarea
+    id: doctor
+    attributes:
+      label: doctor 输出
+      description: 请粘贴 `python -m ashare_similarity.cli doctor` 的输出；如果该命令失败，请粘贴失败输出
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: status 输出
+      description: 请粘贴 `python -m ashare_similarity.cli status --frequency daily` 的输出；若为分钟线问题，也请补充对应频段信息
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: 环境信息
+      description: 操作系统、Python 版本、安装方式、启动方式
+      placeholder: Windows 11 / Python 3.11 / editable install / start_web.bat
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: 额外上下文
+      description: 可附上脱敏截图、最小样例、最近改动、是否使用代理/VPN/局域网模式等
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我没有附上 `data/`、`*.duckdb`、导出文件、全量索引目录或其他大体积本地缓存
+          required: true
+        - label: 我已检查并按需要打码本地路径、局域网 IP、代理或 VPN 信息
+          required: true

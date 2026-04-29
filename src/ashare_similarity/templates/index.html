@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>A股K线相似检索系统</title>
+    <link rel="stylesheet" href="/static/styles.css?v={{ static_version }}" />
+    <script src="/static/vendor/echarts.min.js?v={{ static_version }}"></script>
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <div class="hero-copy-block">
+          <p class="eyebrow">A股形态检索</p>
+          <h1>把最近几天的K线，映射到全市场历史相似案例</h1>
+          <p class="hero-copy">
+            输入股票代码、截止日期、K线周期和窗口长度，系统会同时返回综合相似榜与形态最像榜，
+            并给出每个历史窗口后续 1/3/5/10 个交易日的收益、最大有利波动和最大回撤，便于做短线复盘与样本对照。
+          </p>
+
+          <section class="panel system-status-panel">
+            <div class="panel-header">
+              <h2>系统状态</h2>
+              <p id="system-status-updated">正在读取本地缓存、索引与回填进度</p>
+            </div>
+            <div id="system-status-cards" class="system-status-cards">
+              <div class="empty-state">正在加载状态...</div>
+            </div>
+            <div id="system-status-details" class="system-status-details">
+              <div class="empty-state">正在整理频段、索引和回填详情...</div>
+            </div>
+          </section>
+        </div>
+
+        <div class="hero-panel">
+          <form id="search-form" class="search-form">
+            <label>
+              <span>股票代码 / 名称</span>
+              <input type="text" name="symbol" value="{{ defaults.symbol }}" placeholder="例如 000333 / 美的集团" list="symbol-suggestions" required />
+            </label>
+            <label>
+              <span>截止日期</span>
+              <input type="date" name="end_date" value="{{ defaults.end_date }}" required />
+            </label>
+            <label>
+              <span>K线周期</span>
+              <select name="frequency">
+                <option value="daily" selected>日线</option>
+                <option value="1">1分钟</option>
+                <option value="5">5分钟</option>
+                <option value="15">15分钟</option>
+                <option value="30">30分钟</option>
+                <option value="60">60分钟</option>
+              </select>
+            </label>
+            <label>
+              <span>窗口长度</span>
+              <input type="number" min="3" max="240" name="window_size" value="{{ defaults.window_size }}" required />
+            </label>
+            <label>
+              <span>Top K</span>
+              <input type="number" min="1" max="50" name="top_k" value="{{ defaults.top_k }}" required />
+            </label>
+            <label>
+              <span>搜索范围</span>
+              <select name="search_scope">
+                <option value="historical" selected>历史优先（排除同期）</option>
+                <option value="all">全库（包含同期）</option>
+              </select>
+            </label>
+            <button type="submit">开始检索</button>
+          </form>
+
+          <section class="symbol-tools">
+            <div id="symbol-helper" class="symbol-helper">正在读取当前频段可直接查询的本地标的...</div>
+            <div class="symbol-actions">
+              <button type="button" id="random-symbol-button" class="ghost-button tool-button">随机可用标的</button>
+              <button type="button" id="prepare-symbol-button" class="ghost-button tool-button">补齐当前股票</button>
+            </div>
+            <div id="prepare-result" class="prepare-result" hidden></div>
+            <datalist id="symbol-suggestions"></datalist>
+          </section>
+
+          <div id="status-box" class="status-box">等待查询</div>
+
+          <div class="export-actions">
+            <button type="button" id="predict-button" class="ghost-button disabled" disabled title="请先生成当前查询的日线相似样本">生成研究预测</button>
+            <a id="export-csv" href="#" class="ghost-button disabled" aria-disabled="true">导出 CSV</a>
+            <a id="export-html" href="#" class="ghost-button disabled" aria-disabled="true">导出 HTML</a>
+          </div>
+        </div>
+      </header>
+
+      <main class="content-stack">
+        <section class="analysis-grid">
+          <section class="panel chart-panel">
+            <div class="panel-header">
+              <h2>目标K线</h2>
+              <p id="query-summary">还没有查询结果</p>
+            </div>
+            <div id="query-badges" class="badge-row"></div>
+            <div id="response-notices" class="notice-stack"></div>
+            <div id="query-chart" class="chart"></div>
+          </section>
+
+          <section class="panel stats-panel">
+            <div class="panel-header">
+              <h2>后续表现汇总</h2>
+              <p>基于综合相似榜样本的聚合统计</p>
+            </div>
+            <div id="aggregate-table"></div>
+          </section>
+        </section>
+
+        <section class="panel prediction-panel">
+          <div class="panel-header">
+            <h2>下 1 / 2 个交易日研究预测</h2>
+            <p>基于当前相似样本、量能与市场环境估计，只作为研究信号，不输出买卖建议</p>
+          </div>
+          <div id="prediction-result" class="prediction-result empty-state">
+            <section class="setup-placeholder">
+              <strong>尚未生成预测</strong>
+              <p>请先生成当前查询的相似样本，再点击“生成研究预测”；这里会展示下 1/2 个交易日的研究估计和历史证据。</p>
+            </section>
+          </div>
+        </section>
+
+        <section class="panel list-panel">
+          <div class="panel-header">
+            <h2 id="balanced-title">综合相似榜</h2>
+            <p>价格路径、蜡烛几何、量能与环境综合打分</p>
+          </div>
+          <div id="balanced-list" class="match-list empty-state">暂无结果</div>
+        </section>
+
+        <section class="panel list-panel">
+          <div class="panel-header">
+            <h2 id="shape-title">形态最像榜</h2>
+            <p>更强调价格轮廓与蜡烛结构</p>
+          </div>
+          <div id="shape-list" class="match-list empty-state">暂无结果</div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/app.js?v={{ static_version }}"></script>
+  </body>
+</html>
