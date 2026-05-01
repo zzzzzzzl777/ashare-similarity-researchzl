@@ -52,6 +52,15 @@ def test_build_market_emotion_factor_from_daily_cache():
     assert "prev_top20_chase_return" in factor.columns
     assert "prev_top20_chase_win_rate" in factor.columns
     assert "collapse_warning_signal" in factor.columns
+    assert "bullish_pivot_recognition" in factor.columns
+    assert "limit_premium_failure_signal" in factor.columns
+    assert "bad_sentiment_no_sweep" in factor.columns
+    assert "high_leader_crash_sentiment_collapse" in factor.columns
+    assert "money_effect_sector_rotation" in factor.columns
+    assert "full_position_trigger" in factor.columns
+    assert "same_height_success_rate_1" in factor.columns
+    assert "prev_failed_limit_up_return" in factor.columns
+    assert "failed_limit_up_loss_pressure" in factor.columns
     assert factor.lag_rule == "T day close-derived; use for T+1 prediction only"
 
 
@@ -87,6 +96,46 @@ def test_build_market_emotion_factor_tracks_new_market_structure_signals():
     assert last["liquidity_exhaustion_signal"] == pytest.approx(1.0)
     assert last["market_split_signal"] == pytest.approx(1.0)
     assert last["market_limit_down_rate"] > 0.0
+
+
+def test_build_market_emotion_factor_tracks_failed_board_next_day_profile():
+    dates = pd.bdate_range("2024-01-02", periods=5)
+    rows = []
+    close = np.array([10.0, 10.5, 9.5, 9.6, 9.7])
+    rows.append(
+        pd.DataFrame(
+            {
+                "symbol": "600001",
+                "date": dates,
+                "high": [10.0, 11.0, 9.7, 9.8, 9.9],
+                "low": [10.0, 10.0, 9.4, 9.5, 9.6],
+                "close": close,
+                "amount": 100_000_000.0,
+                "turnover": 4.0,
+            }
+        )
+    )
+    rows.append(
+        pd.DataFrame(
+            {
+                "symbol": "600002",
+                "date": dates,
+                "high": np.full(len(dates), 20.2),
+                "low": np.full(len(dates), 19.8),
+                "close": np.full(len(dates), 20.0),
+                "amount": 100_000_000.0,
+                "turnover": 4.0,
+            }
+        )
+    )
+
+    factor = build_market_emotion_factor(pd.concat(rows, ignore_index=True))
+    target = factor.frame.sort_values("date").iloc[2]
+
+    assert target["prev_failed_limit_up_count"] == pytest.approx(1.0)
+    assert target["prev_failed_limit_up_return"] < 0.0
+    assert target["prev_failed_limit_up_loss_rate"] == pytest.approx(1.0)
+    assert target["failed_limit_up_loss_pressure"] > 0.0
 
 
 def test_build_cross_market_return_factor_applies_known_time_lag():

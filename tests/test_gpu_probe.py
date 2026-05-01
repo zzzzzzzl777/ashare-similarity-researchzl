@@ -57,6 +57,12 @@ def test_symbol_feature_frame_includes_research_factor_pack(make_ohlcv_frame):
         "ma5_pullback_entry",
         "ma5_break_exit",
         "trend_pullback_health",
+        "non_limit_open_strength",
+        "auction_board_trigger_proxy",
+        "safety_margin_calculation_proxy",
+        "seal_grade_confirmation_proxy",
+        "mega_order_absorption_proxy",
+        "popularity_positive_feedback_proxy",
         "day_of_week_sin",
         "month_end_3",
         "short_phase_days_3",
@@ -106,15 +112,21 @@ def test_feature_set_keeps_noisy_research_factors_out_of_default_expanded():
     assert "former_leader_recall" not in expanded
     assert "cs_low_price_advantage" not in expanded
     assert "ma5_pullback_entry" not in expanded
+    assert "non_limit_open_strength" not in expanded
+    assert "seal_grade_confirmation_proxy" not in expanded
     assert "decline_stabilize_signal" not in expanded
-    assert "cycle_day_count" in expanded
-    assert "market_cycle_failed_pressure" in expanded
-    assert "daily_amount_300m_gate" in expanded
-    assert "volume_price_match" in expanded
-    assert "chase_market_up_alignment" in expanded
-    assert "second_board_leader_proxy" in expanded
+    assert "bullish_pivot_recognition" not in expanded
+    assert "real_in_zt_pool" not in expanded
+    assert "cycle_day_count" not in expanded
+    assert "market_cycle_failed_pressure" not in expanded
+    assert "daily_amount_300m_gate" not in expanded
+    assert "volume_price_match" not in expanded
+    assert "chase_market_up_alignment" not in expanded
+    assert "second_board_leader_proxy" not in expanded
+    assert "breakout_first_board_proxy" not in expanded
     assert "money_effect_chase_alignment" not in expanded
     assert "collapse_hot_stock_risk" not in expanded
+    assert "index_panic_rebound_setup" not in expanded
     assert "market_limit_down_rate" in research
     assert "explosive_vol_next_weak" in research
     assert "stock_personality_score" in research
@@ -122,10 +134,228 @@ def test_feature_set_keeps_noisy_research_factors_out_of_default_expanded():
     assert "former_leader_recall" in research
     assert "cs_low_price_advantage" in research
     assert "ma5_pullback_entry" in research
+    assert "non_limit_open_strength" in research
+    assert "seal_grade_confirmation_proxy" in research
     assert "decline_stabilize_signal" in research
+    assert "bullish_pivot_recognition" in research
+    assert "real_in_zt_pool" in research
+    assert "market_real_broken_board_rate" in research
+    assert "cycle_day_count" in research
+    assert "market_cycle_failed_pressure" in research
+    assert "daily_amount_300m_gate" in research
+    assert "volume_price_match" in research
+    assert "chase_market_up_alignment" in research
+    assert "second_board_leader_proxy" in research
+    assert "breakout_first_board_proxy" in research
     assert "money_effect_chase_alignment" in research
     assert "collapse_warning_signal" in research
+    assert "index_panic_rebound_setup" in research
     assert len(research) > len(expanded)
+
+
+def test_tail_accuracy_feature_scores_prioritize_rare_high_precision_signal():
+    torch = pytest.importorskip("torch")
+    signal = torch.zeros(240, 2)
+    signal[:, 0] = torch.linspace(-1.0, 1.0, 240)
+    signal[:24, 1] = 5.0
+    target = torch.zeros(240)
+    target[:24] = 1.0
+    target[80:140] = 1.0
+
+    scores = gpu_probe._tail_accuracy_feature_scores(signal, target)
+
+    assert scores[1] > scores[0]
+    selected = gpu_probe._select_training_feature_indices(
+        signal,
+        target,
+        ("smooth_feature", "rare_precision_feature"),
+        max_features=1,
+        method="stable_tail",
+    )
+    assert selected["method"] == "train_stable_abs_correlation_tail_accuracy"
+    assert selected["top_features"][0] == "rare_precision_feature"
+
+
+def test_default_feature_selection_matches_stable_historical_abs_correlation():
+    torch = pytest.importorskip("torch")
+    signal = torch.zeros(200, 2)
+    signal[:, 0] = torch.linspace(-1.0, 1.0, 200)
+    signal[:20, 1] = 5.0
+    target = (signal[:, 0] > 0).to(torch.float32)
+
+    selected = gpu_probe._select_training_feature_indices(
+        signal,
+        target,
+        ("smooth_feature", "rare_precision_feature"),
+        max_features=1,
+    )
+
+    assert selected["method"] == "train_abs_correlation"
+    assert selected["top_features"][0] == "smooth_feature"
+
+
+def test_feature_selection_forces_jsonl_priority_features():
+    torch = pytest.importorskip("torch")
+    signal = torch.zeros(240, 2)
+    signal[:, 0] = torch.linspace(-1.0, 1.0, 240)
+    signal[:, 1] = torch.linspace(0.25, 1.25, 240)
+    target = (signal[:, 0] > 0).to(torch.float32)
+
+    selected = gpu_probe._select_training_feature_indices(
+        signal,
+        target,
+        ("smooth_feature", "seal_time_score"),
+        max_features=1,
+    )
+
+    assert selected["priority_features"] == ["seal_time_score"]
+    assert selected["top_features"] == ["seal_time_score"]
+    assert selected["selected_features"] == ["seal_time_score"]
+
+
+def test_feature_selection_fills_remaining_slots_after_priority_features():
+    torch = pytest.importorskip("torch")
+    signal = torch.zeros(240, 4)
+    signal[:, 0] = torch.linspace(-1.0, 1.0, 240)
+    signal[:, 1] = -signal[:, 0]
+    signal[:, 2] = torch.linspace(0.5, -0.5, 240)
+    signal[:, 3] = torch.linspace(0.25, 1.25, 240)
+    target = (signal[:, 0] > 0).to(torch.float32)
+
+    selected = gpu_probe._select_training_feature_indices(
+        signal,
+        target,
+        ("smooth_feature", "inverse_feature", "weaker_feature", "market_true_limit_ratio"),
+        max_features=2,
+    )
+
+    assert selected["priority_features"] == ["market_true_limit_ratio"]
+    assert "market_true_limit_ratio" in selected["selected_features"]
+    assert "smooth_feature" in selected["selected_features"]
+    assert selected["selected_feature_count"] == 2
+
+
+def test_feature_selection_skips_low_coverage_priority_features():
+    torch = pytest.importorskip("torch")
+    signal = torch.zeros(240, 2)
+    signal[:, 0] = torch.linspace(-1.0, 1.0, 240)
+    signal[:2, 1] = 1.0
+    target = (signal[:, 0] > 0).to(torch.float32)
+
+    selected = gpu_probe._select_training_feature_indices(
+        signal,
+        target,
+        ("smooth_feature", "seal_time_score"),
+        max_features=1,
+    )
+
+    assert selected["priority_features"] == []
+    assert selected["skipped_priority_feature_count"] == 1
+    assert selected["skipped_priority_features"][0]["feature"] == "seal_time_score"
+    assert selected["skipped_priority_features"][0]["reason"] == "low_nonzero_coverage"
+    assert selected["selected_features"] == ["smooth_feature"]
+
+
+def test_feature_selection_keeps_rare_daily_priority_features():
+    torch = pytest.importorskip("torch")
+    signal = torch.zeros(240, 2)
+    signal[:, 0] = torch.linspace(-1.0, 1.0, 240)
+    signal[:2, 1] = 1.0
+    target = (signal[:, 0] > 0).to(torch.float32)
+
+    selected = gpu_probe._select_training_feature_indices(
+        signal,
+        target,
+        ("smooth_feature", "is_second_board"),
+        max_features=1,
+    )
+
+    assert selected["priority_features"] == ["is_second_board"]
+    assert selected["selected_features"] == ["is_second_board"]
+    assert selected["skipped_priority_feature_count"] == 0
+
+
+def test_pair_regime_confidence_selector_finds_two_factor_gate():
+    torch = pytest.importorskip("torch")
+    rows = 1200
+    feature_a = torch.zeros(rows)
+    feature_b = torch.zeros(rows)
+    feature_a[:120] = 1.0
+    feature_b[:120] = 1.0
+    feature_a[600:720] = 1.0
+    feature_b[600:720] = 1.0
+    x_valid = torch.stack([feature_a, feature_b], dim=1)
+    x_test = x_valid.clone()
+    y_valid = torch.zeros(rows)
+    y_valid[:120] = 1.0
+    y_valid[600:720] = 1.0
+    valid_prob = torch.full((rows,), 0.40)
+    valid_prob[:120] = 0.90
+    valid_prob[600:720] = 0.90
+    test_prob = valid_prob.clone()
+
+    selector = gpu_probe._fit_pair_regime_confidence_selector(
+        x_valid,
+        y_valid,
+        valid_prob,
+        x_test,
+        test_prob,
+        threshold=0.5,
+        target_accuracy=0.75,
+        feature_names=("market_limit_down_rate", "cross_sz399001_ret_3"),
+    )
+
+    assert selector["method"] == "pair_regime_probability_gate"
+    assert selector["eligible"] is True
+    assert selector["validation_accuracy"] == pytest.approx(1.0)
+    assert bool(selector["test_mask"].any())
+
+
+def test_pair_regime_confidence_selector_returns_best_constrained_fallback():
+    torch = pytest.importorskip("torch")
+    rows = 1200
+    feature_a = torch.zeros(rows)
+    feature_b = torch.zeros(rows)
+    feature_a[:240] = 1.0
+    feature_b[:240] = 1.0
+    x_valid = torch.stack([feature_a, feature_b], dim=1)
+    x_test = x_valid.clone()
+    y_valid = torch.zeros(rows)
+    y_valid[:156] = 1.0
+    y_valid[240:720] = 1.0
+    valid_prob = torch.full((rows,), 0.40)
+    valid_prob[:240] = 0.90
+    test_prob = valid_prob.clone()
+
+    selector = gpu_probe._fit_pair_regime_confidence_selector(
+        x_valid,
+        y_valid,
+        valid_prob,
+        x_test,
+        test_prob,
+        threshold=0.5,
+        target_accuracy=0.75,
+        feature_names=("real_seal_time_minutes", "real_in_zt_pool"),
+    )
+
+    assert selector["method"] == "pair_regime_probability_gate"
+    assert selector["eligible"] is False
+    assert selector["validation_count"] >= 200
+    assert selector["validation_coverage"] >= 0.10
+    assert bool(selector["test_mask"].any())
+
+
+def test_regime_feature_indices_include_real_limit_pool_jsonl_terms():
+    feature_names = (
+        "plain_noise",
+        "real_seal_time_minutes",
+        "real_in_zt_pool",
+        "real_in_zbgc_pool",
+    )
+
+    indices = gpu_probe._regime_feature_indices(feature_names)
+
+    assert indices == [1, 2, 3]
 
 
 def test_short_filter_keeps_only_active_stock_phases(make_ohlcv_frame):
@@ -198,6 +428,13 @@ def test_acceptance_uses_high_confidence_wilson_gate_not_full_sample_accuracy_on
         target_accuracy=0.8,
         future_label_filter_used=True,
     )
+    seen_lockbox = gpu_probe._acceptance_summary(
+        result,
+        test_rows=50_000,
+        required_test_rows=50_000,
+        target_accuracy=0.8,
+        lockbox_role="seen_research",
+    )
 
     assert accepted["passed"] is True
     assert too_few_rows["passed"] is True
@@ -208,6 +445,9 @@ def test_acceptance_uses_high_confidence_wilson_gate_not_full_sample_accuracy_on
     assert tiny_confident["high_confidence"]["statistical_rows_met"] is False
     assert weak_brier["passed"] is False
     assert future_filtered["passed"] is False
+    assert seen_lockbox["passed"] is False
+    assert seen_lockbox["status"] == "research_only"
+    assert seen_lockbox["passed_without_lockbox_role_gate"] is True
 
 
 def test_cross_section_adds_short_emotion_features():
@@ -230,6 +470,11 @@ def test_cross_section_adds_short_emotion_features():
             "failed_limit_up": [0.0, 1.0, 0.0, 0.0],
             "near_limit_close": [1.0, 0.0, 0.0, 0.0],
             "close_position": [0.9, 0.8, 0.2, 0.1],
+            "cross_sz399001_ret_3": [-6.0, -6.0, -6.0, -6.0],
+            "cross_sz399006_ret_3": [-6.5, -6.5, -6.5, -6.5],
+            "cross_sh000001_ret_3": [-3.0, -3.0, -3.0, -3.0],
+            "dist_low_20": [0.05, 0.10, 0.20, 0.30],
+            "lower_shadow_pct": [2.0, 1.0, 0.2, 0.1],
         }
     )
 
@@ -240,10 +485,185 @@ def test_cross_section_adds_short_emotion_features():
     assert out["cs_big_up_rate"].iloc[0] == pytest.approx(0.5)
     assert out["cs_failed_limit_up_rate"].iloc[0] == pytest.approx(0.25)
     assert "cs_emotion_score" in out.columns
+    assert "cs_active_anomaly_rank" in out.columns
+    assert out.loc[out["symbol"] == "600001", "cs_active_anomaly_rank"].iloc[0] > out.loc[
+        out["symbol"] == "600004",
+        "cs_active_anomaly_rank",
+    ].iloc[0]
+    assert out.loc[out["symbol"] == "600001", "cs_short_pool_top_decile"].iloc[0] == pytest.approx(1.0)
     assert "market_cycle_failed_pressure" in out.columns
     assert "market_hot_cycle_short_pressure" in out.columns
     assert "cs_low_price_advantage" in out.columns
     assert "cs_reversal_day_leader_quality" in out.columns
+    assert "breakout_first_board_proxy" in out.columns
+    assert out["index_panic_rebound_setup"].iloc[0] > 0.0
+    assert out["index_panic_rebound_leader"].iloc[0] > out["index_panic_rebound_leader"].iloc[3]
+
+
+def test_active_anomaly_filter_keeps_ranked_short_pool():
+    frame = pd.DataFrame(
+        {
+            "symbol": ["600001", "600002", "600003"],
+            "cs_active_anomaly_rank": [0.95, 0.70, 0.20],
+            "actual": [1.0, 0.0, 1.0],
+        }
+    )
+    config = GpuProbeConfig(
+        start=date(2024, 1, 1),
+        train_end=date(2024, 3, 1),
+        test_start=date(2024, 3, 4),
+        end=date(2024, 5, 31),
+        min_active_anomaly_rank=0.75,
+    )
+
+    filtered, report = gpu_probe._apply_active_anomaly_filter(frame, config)
+
+    assert filtered["symbol"].tolist() == ["600001"]
+    assert report["enabled"] is True
+    assert report["rows_before"] == 3
+    assert report["rows_after"] == 1
+
+
+def test_methodology_audit_keeps_active_rank_out_of_cache_fingerprint():
+    config = GpuProbeConfig(
+        start=date(2024, 1, 1),
+        train_end=date(2024, 3, 1),
+        test_start=date(2024, 3, 4),
+        end=date(2024, 5, 31),
+        min_active_anomaly_rank=0.65,
+    )
+
+    audit = gpu_probe._methodology_audit_summary(
+        config,
+        feature_cache={"fingerprint": "abc123"},
+        active_rank_filter={"enabled": True},
+        external_factors=[{"name": "sparse_factor", "coverage_rate": 0.001}],
+    )
+
+    assert audit["feature_cache_policy"]["active_rank_filter_in_cache_fingerprint"] is False
+    assert audit["feature_cache_policy"]["active_rank_filter_stage"] == "post_feature_cache_pre_split"
+    assert audit["feature_cache_policy"]["cache_contains_short_filter_matrix"] is True
+    assert audit["sample_gate"]["min_active_anomaly_rank"] == pytest.approx(0.65)
+    assert audit["low_coverage_factor_reports"] == ["sparse_factor"]
+
+
+def test_research_diagnostics_isolates_test_oracle_keys():
+    result = gpu_probe._isolate_research_diagnostics(
+        {
+            "accuracy": 0.8,
+            "test_oracle_coverage_at_target_accuracy": 0.2,
+            "test_oracle_count_at_target_accuracy": 100,
+            "test_oracle_note": "research only",
+        }
+    )
+
+    assert "test_oracle_coverage_at_target_accuracy" not in result
+    assert result["research_diagnostics"]["test_oracle"]["test_oracle_count_at_target_accuracy"] == 100
+    assert result["research_diagnostics"]["test_oracle"]["note"] == "research only"
+
+
+def test_lockbox_identity_ignores_self_reported_role():
+    train = pd.DataFrame(
+        {
+            "symbol": ["600001"],
+            "date": pd.to_datetime(["2024-02-01"]),
+            "label_date": pd.to_datetime(["2024-02-02"]),
+        }
+    )
+    test = pd.DataFrame(
+        {
+            "symbol": ["600001", "600002"],
+            "date": pd.to_datetime(["2024-04-01", "2024-04-01"]),
+            "label_date": pd.to_datetime(["2024-04-02", "2024-04-02"]),
+        }
+    )
+    base_config = dict(
+        start=date(2024, 1, 1),
+        train_end=date(2024, 3, 1),
+        test_start=date(2024, 4, 1),
+        end=date(2024, 4, 30),
+    )
+
+    seen = gpu_probe._probe_split_manifest(
+        GpuProbeConfig(**base_config, lockbox_role="seen_research"),
+        train=train,
+        test=test,
+        training_result={},
+    )
+    final = gpu_probe._probe_split_manifest(
+        GpuProbeConfig(**base_config, lockbox_role="final_unseen"),
+        train=train,
+        test=test,
+        training_result={},
+    )
+
+    assert seen["split_hash"] != final["split_hash"]
+    assert seen["lockbox_identity_hash"] == final["lockbox_identity_hash"]
+
+
+def test_final_unseen_lockbox_is_blocked_after_research_observation(app_config):
+    split_manifest = {
+        "lockbox_identity_hash": "same-lockbox",
+        "split_hash": "seen-split",
+        "train_end": "2024-03-01",
+        "test_start": "2024-04-01",
+        "end": "2024-04-30",
+        "test_event_start": "2024-04-01",
+        "test_event_end": "2024-04-30",
+        "test_lockbox_rows": 50_000,
+    }
+    directory = app_config.storage.report_dir / "prediction"
+    artifact = directory / "runs" / "seen-run" / "acceptance.json"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("{}", encoding="utf-8")
+    gpu_probe._append_lockbox_ledger_record(
+        directory,
+        {
+            "run_id": "seen-run",
+            "status": "completed",
+            "lockbox_role": "seen_research",
+            "acceptance": {"passed": False},
+            "split_manifest": split_manifest,
+            "split_hash": "seen-split",
+        },
+        artifact_path=artifact,
+    )
+
+    final_config = GpuProbeConfig(
+        start=date(2024, 1, 1),
+        train_end=date(2024, 3, 1),
+        test_start=date(2024, 4, 1),
+        end=date(2024, 4, 30),
+        lockbox_role="final_unseen",
+    )
+    ledger = gpu_probe._lockbox_ledger_status(
+        SimpleNamespace(config=app_config),
+        split_manifest=split_manifest,
+        config=final_config,
+    )
+    acceptance = gpu_probe._acceptance_summary(
+        {
+            "accuracy": 0.8,
+            "brier": 0.2,
+            "baseline_brier": 0.24,
+            "confident_accuracy": 0.9,
+            "confident_brier": 0.18,
+            "confident_count": 50_000,
+            "confident_correct_count": 45_000,
+            "confident_coverage": 1.0,
+        },
+        test_rows=50_000,
+        required_test_rows=50_000,
+        target_accuracy=0.75,
+        lockbox_role="final_unseen",
+        lockbox_ledger=ledger,
+    )
+
+    assert ledger["gate_met"] is False
+    assert ledger["observed_run_ids"] == ["seen-run"]
+    assert acceptance["passed"] is False
+    assert acceptance["status"] == "lockbox_reused"
+    assert acceptance["passed_without_lockbox_ledger_gate"] is True
 
 
 def test_run_gpu_probe_threads_target_accuracy_into_training(monkeypatch, make_ohlcv_frame):
@@ -253,6 +673,8 @@ def test_run_gpu_probe_threads_target_accuracy_into_training(monkeypatch, make_o
     def _train_and_score(train, test, **kwargs):
         seen["target_accuracy"] = kwargs["target_accuracy"]
         seen["max_selected_features"] = kwargs["max_selected_features"]
+        seen["feature_selection_method"] = kwargs["feature_selection_method"]
+        seen["candidate_family"] = kwargs["candidate_family"]
         seen["feature_names"] = kwargs["feature_names"]
         seen["train_label_max"] = train["label_date"].max().date()
         seen["test_date_min"] = test["date"].min().date()
@@ -307,6 +729,8 @@ def test_run_gpu_probe_threads_target_accuracy_into_training(monkeypatch, make_o
             short_only=False,
             feature_set="expanded",
             max_selected_features=123,
+            feature_selection_method="stable_tail",
+            candidate_family="torch",
         ),
     )
 
@@ -317,8 +741,11 @@ def test_run_gpu_probe_threads_target_accuracy_into_training(monkeypatch, make_o
     assert result["acceptance"]["high_confidence"]["statistical_rows_met"] is False
     assert result["required_test_rows"] == 20
     assert result["max_selected_features"] == 123
+    assert result["candidate_family"] == "torch"
     assert seen["target_accuracy"] == 0.8
     assert seen["max_selected_features"] == 123
+    assert seen["feature_selection_method"] == "stable_tail"
+    assert seen["candidate_family"] == "torch"
     assert "overnight_return" in seen["feature_names"]
     assert seen["train_label_max"] <= date(2024, 3, 1)
     assert seen["test_date_min"] >= date(2024, 3, 4)
@@ -370,8 +797,10 @@ def test_gpu_probe_prefers_batch_market_data_loader(monkeypatch, make_ohlcv_fram
     market_data = pl.from_pandas(pd.concat(frames, ignore_index=True))
 
     def _load_market_data(**kwargs):
-        calls.append("batch")
+        calls.append(kwargs["frequency"])
         assert set(kwargs["symbols"]) == set(symbols)
+        if kwargs["frequency"] != "daily":
+            return pl.DataFrame()
         return market_data
 
     def _load_bars(symbol, frequency):
@@ -397,7 +826,7 @@ def test_gpu_probe_prefers_batch_market_data_loader(monkeypatch, make_ohlcv_fram
         ),
     )
 
-    assert calls == ["batch"]
+    assert calls == ["daily", "5"]
     assert result["data_loader"]["mode"] == "polars_batch_load_market_data"
 
 
@@ -451,8 +880,9 @@ def test_gpu_probe_reuses_feature_cache(monkeypatch, app_config, make_ohlcv_fram
 
     def _load_market_data(**kwargs):
         nonlocal load_calls
-        del kwargs
         load_calls += 1
+        if kwargs["frequency"] != "daily":
+            return pl.DataFrame()
         return market_data
 
     monkeypatch.setattr(gpu_probe, "_train_and_score", _train_and_score)
@@ -475,9 +905,104 @@ def test_gpu_probe_reuses_feature_cache(monkeypatch, app_config, make_ohlcv_fram
     second = gpu_probe.run_gpu_next_day_probe(store, config)
 
     assert train_calls == 2
-    assert load_calls == 1
+    assert load_calls == 2
     assert first["feature_cache"]["written"] is True
     assert second["feature_cache"]["hit"] is True
+
+
+def test_feature_cache_fingerprint_changes_when_limit_pool_snapshots_change(app_config):
+    store = SimpleNamespace(config=app_config)
+    config = GpuProbeConfig(
+        start=date(2024, 1, 1),
+        train_end=date(2024, 3, 1),
+        test_start=date(2024, 3, 4),
+        end=date(2024, 5, 31),
+        short_only=False,
+    )
+    symbols = ["600001", "600002"]
+
+    before = gpu_probe._feature_cache_descriptor(store, config, symbols=symbols)
+    snapshot_dir = app_config.storage.cache_dir / "prediction" / "limit_pool_snapshots" / "trade_date=20260430"
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    (snapshot_dir / "manifest.json").write_text(
+        json.dumps({"trade_date": "20260430", "kinds": {"zt_pool": {"rows": 2}}}),
+        encoding="utf-8",
+    )
+
+    after = gpu_probe._feature_cache_descriptor(store, config, symbols=symbols)
+
+    assert before["fingerprint"] != after["fingerprint"]
+    assert after["limit_pool_snapshot_state"]["status"] == "available"
+
+
+def test_feature_cache_fingerprint_changes_when_intraday_cache_changes(app_config):
+    store = SimpleNamespace(config=app_config)
+    config = GpuProbeConfig(
+        start=date(2024, 1, 1),
+        train_end=date(2024, 3, 1),
+        test_start=date(2024, 3, 4),
+        end=date(2024, 5, 31),
+        short_only=False,
+        intraday_factor_frequency="5",
+    )
+    symbols = ["600001", "600002"]
+
+    before = gpu_probe._feature_cache_descriptor(store, config, symbols=symbols)
+    minute_dir = app_config.storage.raw_dir / "bars" / "5"
+    minute_dir.mkdir(parents=True, exist_ok=True)
+    (minute_dir / "600001.parquet").write_bytes(b"minute-cache-marker")
+
+    after = gpu_probe._feature_cache_descriptor(store, config, symbols=symbols)
+
+    assert before["fingerprint"] != after["fingerprint"]
+    assert after["intraday_cache_state"]["status"] == "available"
+
+
+def test_attach_intraday_factor_features_merges_cached_minute_bars():
+    pytest.importorskip("polars")
+    import polars as pl
+
+    base = pd.DataFrame(
+        {
+            "symbol": ["600001", "600001"],
+            "date": pd.to_datetime(["2024-04-01", "2024-04-02"]),
+            "actual": [1.0, 0.0],
+        }
+    )
+    minute_frame = pd.DataFrame(
+        {
+            "symbol": ["600001"] * 12,
+            "timestamp": pd.date_range("2024-04-01 09:30", periods=12, freq="5min"),
+            "open": np.linspace(10.0, 10.2, 12),
+            "high": np.linspace(10.1, 10.3, 12),
+            "low": np.linspace(9.9, 10.1, 12),
+            "close": np.linspace(10.0, 10.4, 12),
+            "volume": np.full(12, 1000.0),
+        }
+    )
+
+    def _load_market_data(**kwargs):
+        assert kwargs["frequency"] == "5"
+        return pl.from_pandas(minute_frame)
+
+    config = GpuProbeConfig(
+        start=date(2024, 1, 1),
+        train_end=date(2024, 3, 1),
+        test_start=date(2024, 3, 4),
+        end=date(2024, 5, 31),
+    )
+
+    merged, reports = gpu_probe._attach_intraday_factor_features(
+        base,
+        store=SimpleNamespace(load_market_data=_load_market_data),
+        config=config,
+    )
+
+    assert reports[0]["name"] == "intraday_structure"
+    assert reports[0]["status"] == "available"
+    assert merged.loc[0, "minute_last_30min_return_available"] == pytest.approx(1.0)
+    assert merged.loc[1, "minute_last_30min_return_available"] == pytest.approx(0.0)
+    assert merged.loc[0, "minute_last_30min_return"] > 0.0
 
 
 def test_gpu_probe_floors_target_accuracy_at_75(monkeypatch, make_ohlcv_frame):
@@ -586,6 +1111,58 @@ def test_confidence_band_reports_chronological_stability():
     assert "stable_constraint_met" in band
 
 
+def test_joint_threshold_selection_optimizes_confidence_band_score():
+    torch = pytest.importorskip("torch")
+    prob = torch.cat(
+        [
+            torch.full((220,), 0.92),
+            torch.full((180,), 0.58),
+            torch.full((600,), 0.08),
+        ]
+    )
+    y = torch.cat(
+        [
+            torch.cat([torch.ones(180), torch.zeros(40)]),
+            torch.ones(180),
+            torch.zeros(600),
+        ]
+    ).to(torch.float32)
+    target = 0.75
+    base_threshold, base_accuracy = gpu_probe._best_threshold(prob, y)
+    base_band = gpu_probe._best_confidence_band(
+        prob,
+        y,
+        threshold=base_threshold,
+        target_accuracy=target,
+        min_count=100,
+        min_coverage=0.10,
+    )
+
+    threshold, accuracy, band = gpu_probe._best_threshold_and_confidence_band(
+        prob,
+        y,
+        target_accuracy=target,
+        min_count=100,
+        min_coverage=0.10,
+    )
+
+    base_score = gpu_probe._candidate_selection_score(
+        base_accuracy,
+        gpu_probe._brier(prob, y),
+        base_band,
+        target_accuracy=target,
+    )
+    joint_score = gpu_probe._candidate_selection_score(
+        accuracy,
+        gpu_probe._brier(prob, y),
+        band,
+        target_accuracy=target,
+    )
+    assert 0.25 <= threshold <= 0.75
+    assert joint_score >= base_score
+    assert "wilson_lower_95" in band
+
+
 def test_confidence_selector_prefers_agreement_when_probability_band_is_unstable():
     probability = {
         "method": "probability_band",
@@ -606,6 +1183,31 @@ def test_confidence_selector_prefers_agreement_when_probability_band_is_unstable
     }
 
     selected, mask = gpu_probe._select_confidence_selector([(probability, "band"), (agreement, "agree")])
+
+    assert selected["method"] == "candidate_agreement"
+    assert mask == "agree"
+
+
+def test_confidence_selector_treats_zero_stability_as_real_zero():
+    unstable_pair = {
+        "method": "pair_regime_probability_gate",
+        "eligible": False,
+        "validation_accuracy": 0.70,
+        "validation_wilson_lower_95": 0.68,
+        "validation_stability_min_wilson_lower_95": 0.0,
+        "validation_coverage": 0.12,
+        "validation_count": 2400,
+    }
+    agreement = {
+        "method": "candidate_agreement",
+        "eligible": False,
+        "validation_accuracy": 0.64,
+        "validation_wilson_lower_95": 0.62,
+        "validation_coverage": 0.12,
+        "validation_count": 2400,
+    }
+
+    selected, mask = gpu_probe._select_confidence_selector([(unstable_pair, "pair"), (agreement, "agree")])
 
     assert selected["method"] == "candidate_agreement"
     assert mask == "agree"
@@ -641,7 +1243,7 @@ def test_train_prediction_reads_passed_gpu_probe_artifact(app_config):
                     "baseline_brier": 0.24,
                     "test_rows": 50_000,
                     "target_accuracy": 0.75,
-                    "acceptance": {"passed": True},
+                    "acceptance": {"passed": True, "lockbox_role": "final_unseen", "final_acceptance_eligible": True},
                 },
             }
         ),
@@ -660,6 +1262,42 @@ def test_train_prediction_reads_passed_gpu_probe_artifact(app_config):
     assert result["status"] == "ready_for_global_fit"
     assert result["acceptance"] == "passed"
     assert result["gate_artifact"]["test_rows"] == 50_000
+    assert result["gate_artifact"]["lockbox_role"] == "final_unseen"
+
+
+def test_train_prediction_rejects_seen_research_passed_artifact(app_config):
+    artifact_dir = app_config.storage.report_dir / "prediction"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifact = artifact_dir / "gpu_probe_passed_latest.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-04-29T00:00:00+00:00",
+                "result": {
+                    "model": "stub",
+                    "accuracy": 0.76,
+                    "brier": 0.2,
+                    "baseline_brier": 0.24,
+                    "test_rows": 50_000,
+                    "target_accuracy": 0.75,
+                    "acceptance": {"passed": True, "lockbox_role": "seen_research", "final_acceptance_eligible": False},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    service = PredictionService(
+        config=app_config,
+        store=SimpleNamespace(),
+        data_service=SimpleNamespace(),
+        feature_service=SimpleNamespace(),
+        search_service=SimpleNamespace(),
+    )
+
+    result = service.train_model()
+
+    assert result["status"] == "blocked"
+    assert result["acceptance"] == "failed"
 
 
 def test_train_prediction_reads_immutable_passed_run_pointer(app_config):
@@ -686,7 +1324,7 @@ def test_train_prediction_reads_immutable_passed_run_pointer(app_config):
                     "baseline_brier": 0.24,
                     "test_rows": 50_000,
                     "target_accuracy": 0.75,
-                    "acceptance": {"passed": True},
+                    "acceptance": {"passed": True, "lockbox_role": "final_unseen", "final_acceptance_eligible": True},
                 },
             }
         ),
@@ -709,3 +1347,100 @@ def test_train_prediction_reads_immutable_passed_run_pointer(app_config):
     assert result["status"] == "ready_for_global_fit"
     assert result["approved_run_id"] == "run-123"
     assert result["gate_artifact"]["feature_hash"] == "features"
+
+
+def test_next_high_from_close_label_marks_intraday_high_1pct_even_if_close_drops(make_ohlcv_frame):
+    torch = pytest.importorskip("torch")
+    frame = make_ohlcv_frame(periods=90, base_price=10.0, volume_base=5_000_000.0)
+    frame["amount"] = frame["volume"] * frame["close"]
+    frame["turnover"] = np.linspace(3.0, 10.0, len(frame))
+
+    t_idx = len(frame) - 2
+    t1_idx = len(frame) - 1
+    t_close = 10.00
+    frame.loc[t_idx, "close"] = t_close
+    frame.loc[t1_idx, "open"] = t_close * 1.005
+    frame.loc[t1_idx, "high"] = t_close * 1.012
+    frame.loc[t1_idx, "low"] = t_close * 0.97
+    frame.loc[t1_idx, "close"] = t_close * 0.985
+
+    features_high = gpu_probe._symbol_feature_frame(
+        frame,
+        symbol="600519",
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
+        device=torch.device("cpu"),
+        config=GpuProbeConfig(
+            start=date(2024, 1, 1),
+            train_end=date(2024, 3, 1),
+            test_start=date(2024, 3, 4),
+            end=date(2024, 12, 31),
+            short_only=False,
+            label_target="next_high_from_close",
+            target_high_return_pct=1.0,
+        ),
+    )
+    features_close = gpu_probe._symbol_feature_frame(
+        frame,
+        symbol="600519",
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
+        device=torch.device("cpu"),
+        config=GpuProbeConfig(
+            start=date(2024, 1, 1),
+            train_end=date(2024, 3, 1),
+            test_start=date(2024, 3, 4),
+            end=date(2024, 12, 31),
+            short_only=False,
+            label_target="next_close_up",
+        ),
+    )
+
+    t_date = frame.loc[t_idx, "date"]
+    row_high = features_high[features_high["date"] == t_date]
+    row_close = features_close[features_close["date"] == t_date]
+    assert not row_high.empty, f"T-date {t_date} missing from next_high_from_close features"
+    assert not row_close.empty, f"T-date {t_date} missing from next_close_up features"
+    assert float(row_high.iloc[0]["actual"]) == 1.0
+    assert float(row_close.iloc[0]["actual"]) == 0.0
+    assert float(row_high.iloc[0]["next_high_return_pct"]) == pytest.approx(1.2, abs=0.5)
+    assert float(row_high.iloc[0]["next_close_return_pct"]) < 0.0
+    assert float(row_high.iloc[0]["next_close_up"]) == 0.0
+
+
+def test_acceptance_coverage_gate_requires_both_count_and_coverage():
+    result_high_count_low_coverage = {
+        "accuracy": 0.80,
+        "correct_count": 40_000,
+        "brier": 0.20,
+        "baseline_brier": 0.24,
+        "confident_accuracy": 0.85,
+        "confident_correct_count": 8_500,
+        "confident_brier": 0.18,
+        "confident_count": 10_000,
+        "confident_coverage": 0.05,
+    }
+    accepted_both = gpu_probe._acceptance_summary(
+        {**result_high_count_low_coverage, "confident_coverage": 0.20},
+        test_rows=50_000,
+        required_test_rows=50_000,
+        target_accuracy=0.75,
+    )
+    fail_low_coverage = gpu_probe._acceptance_summary(
+        result_high_count_low_coverage,
+        test_rows=50_000,
+        required_test_rows=50_000,
+        target_accuracy=0.75,
+    )
+    fail_low_count = gpu_probe._acceptance_summary(
+        {**result_high_count_low_coverage, "confident_count": 5_000, "confident_correct_count": 4_250, "confident_coverage": 0.20},
+        test_rows=50_000,
+        required_test_rows=50_000,
+        target_accuracy=0.75,
+    )
+
+    assert accepted_both["high_confidence"]["coverage_gate_met"] is True
+    assert fail_low_coverage["high_confidence"]["coverage_gate_met"] is False
+    assert fail_low_coverage["passed"] is False
+    assert fail_low_count["high_confidence"]["coverage_gate_met"] is False
+    assert fail_low_count["passed"] is False

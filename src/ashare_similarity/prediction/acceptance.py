@@ -82,7 +82,7 @@ def build_prediction_acceptance(
     wilson_met = wilson_lower >= target
     coverage_gate_met = (
         confident_count >= int(thresholds.high_confidence_min_rows)
-        or confident_coverage >= float(thresholds.high_confidence_min_coverage)
+        and confident_coverage >= float(thresholds.high_confidence_min_coverage)
     )
     statistical_rows_met = confident_count >= int(thresholds.statistical_min_rows)
     count_consistent = 0 <= confident_count <= test_rows

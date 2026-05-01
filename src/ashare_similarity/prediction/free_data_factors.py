@@ -21,6 +21,7 @@ MARKET_EMOTION_COLUMNS: tuple[str, ...] = (
     "seal_rate_80_threshold",
     "market_limit_down_rate",
     "market_one_word_board_count",
+    "market_high_leader_crash_count",
     "market_emotion_score",
     "emotion_phase_code",
     "emotion_phase_ice",
@@ -51,8 +52,17 @@ MARKET_EMOTION_COLUMNS: tuple[str, ...] = (
     "market_board_promotion_rate_1to2",
     "market_board_promotion_rate_2to3",
     "market_board_promotion_rate_high",
+    "same_height_success_rate_1",
+    "same_height_success_rate_2",
+    "same_height_success_rate_3plus",
+    "same_height_failure_pressure",
     "prev_limit_up_premium",
     "prev_board_premium",
+    "prev_failed_limit_up_count",
+    "prev_failed_limit_up_return",
+    "prev_failed_limit_up_red_rate",
+    "prev_failed_limit_up_loss_rate",
+    "failed_limit_up_loss_pressure",
     "prev_top20_chase_return",
     "prev_top20_chase_win_rate",
     "prev_bottom20_rebound_return",
@@ -70,6 +80,15 @@ MARKET_EMOTION_COLUMNS: tuple[str, ...] = (
     "strong_market_regime",
     "weak_market_oversold_regime",
     "bull_hotspot_bear_oversold",
+    "bullish_pivot_recognition",
+    "limit_premium_failure_signal",
+    "bad_sentiment_no_sweep",
+    "high_leader_crash_sentiment_collapse",
+    "no_theme_rotation_mode",
+    "money_effect_sector_rotation",
+    "full_position_trigger",
+    "late_cycle_position_cap",
+    "bear_position_reduction",
 )
 
 BOARD_STRUCTURE_COLUMNS: tuple[str, ...] = (
@@ -131,8 +150,10 @@ def build_market_emotion_factor(daily_bars: pd.DataFrame) -> FactorFrame:
     frame["board_count"] = frame.groupby("symbol", sort=False)["limit_up_like"].transform(_consecutive_true_count)
     frame["prev_board_count"] = frame.groupby("symbol", sort=False)["board_count"].shift(1).fillna(0.0)
     frame["board_promoted_today"] = (frame["board_count"] == frame["prev_board_count"] + 1.0) & (frame["board_count"] > 1.0)
+    frame["high_leader_crash"] = (frame["prev_board_count"] >= 3.0) & (frame["ret_pct"] <= -7.0)
     frame["prev_limit_up_flag"] = frame.groupby("symbol", sort=False)["limit_up_like"].shift(1).eq(True)
     frame["prev_board_flag"] = frame.groupby("symbol", sort=False)["board_count"].shift(1).fillna(0.0) >= 2.0
+    frame["prev_failed_limit_up_flag"] = frame.groupby("symbol", sort=False)["failed_limit_up"].shift(1).eq(True)
     frame["top20_ret_rank"] = frame.groupby("date", sort=False)["ret_pct"].rank(method="first", ascending=False)
     frame["bottom20_ret_rank"] = frame.groupby("date", sort=False)["ret_pct"].rank(method="first", ascending=True)
     frame["prev_top20_ret_flag"] = frame.groupby("symbol", sort=False)["top20_ret_rank"].shift(1).le(20.0)
@@ -163,6 +184,16 @@ def build_market_emotion_factor(daily_bars: pd.DataFrame) -> FactorFrame:
         if values["prev_board_flag"].any()
         else 0.0,
     )
+    prev_failed_count = grouped["prev_failed_limit_up_flag"].sum().astype(float)
+    prev_failed_return = _group_apply(grouped, lambda values: _flagged_mean(values, "prev_failed_limit_up_flag", "ret_pct"))
+    prev_failed_red_rate = _group_apply(grouped, lambda values: _flagged_positive_rate(values, "prev_failed_limit_up_flag", "ret_pct"))
+    prev_failed_loss_rate = _group_apply(
+        grouped,
+        lambda values: _flagged_rate(values, "prev_failed_limit_up_flag", "ret_pct", threshold=0.0, op="<"),
+    )
+    same_height_1 = _group_apply(grouped, lambda values: _promotion_rate(values, start_level=1)).astype(float)
+    same_height_2 = _group_apply(grouped, lambda values: _promotion_rate(values, start_level=2)).astype(float)
+    same_height_3plus = _group_apply(grouped, lambda values: _promotion_rate(values, min_start_level=3)).astype(float)
     top20_chase_return = _group_apply(grouped, lambda values: _flagged_mean(values, "prev_top20_ret_flag", "ret_pct"))
     top20_chase_win_rate = _group_apply(grouped, lambda values: _flagged_positive_rate(values, "prev_top20_ret_flag", "ret_pct"))
     bottom20_rebound_return = _group_apply(grouped, lambda values: _flagged_mean(values, "prev_bottom20_ret_flag", "ret_pct"))
@@ -186,6 +217,7 @@ def build_market_emotion_factor(daily_bars: pd.DataFrame) -> FactorFrame:
             "market_limit_seal_success_rate": (sealed_count / touched_count.replace(0.0, np.nan)).fillna(0.0).to_numpy(),
             "market_limit_down_rate": (limit_down_count / grouped.size().replace(0.0, np.nan)).fillna(0.0).to_numpy(),
             "market_one_word_board_count": grouped["one_word_board_like"].sum().astype(float).to_numpy(),
+            "market_high_leader_crash_count": grouped["high_leader_crash"].sum().astype(float).to_numpy(),
             "market_emotion_score": emotion_score.to_numpy(),
             "market_advance_decline_ratio": grouped["ret_pct"].apply(_advance_decline_ratio).astype(float).to_numpy(),
             "market_new_high_20_count": grouped["new_high_20"].sum().astype(float).to_numpy(),
@@ -195,11 +227,27 @@ def build_market_emotion_factor(daily_bars: pd.DataFrame) -> FactorFrame:
             "market_max_board_height": max_board_height.to_numpy(),
             "market_echelon_completeness": _group_apply(grouped, _echelon_completeness).astype(float).to_numpy(),
             "market_board_promotion_rate": _group_apply(grouped, _promotion_rate).astype(float).to_numpy(),
-            "market_board_promotion_rate_1to2": _group_apply(grouped, lambda values: _promotion_rate(values, start_level=1)).astype(float).to_numpy(),
-            "market_board_promotion_rate_2to3": _group_apply(grouped, lambda values: _promotion_rate(values, start_level=2)).astype(float).to_numpy(),
-            "market_board_promotion_rate_high": _group_apply(grouped, lambda values: _promotion_rate(values, min_start_level=3)).astype(float).to_numpy(),
+            "market_board_promotion_rate_1to2": same_height_1.to_numpy(),
+            "market_board_promotion_rate_2to3": same_height_2.to_numpy(),
+            "market_board_promotion_rate_high": same_height_3plus.to_numpy(),
+            "same_height_success_rate_1": same_height_1.to_numpy(),
+            "same_height_success_rate_2": same_height_2.to_numpy(),
+            "same_height_success_rate_3plus": same_height_3plus.to_numpy(),
+            "same_height_failure_pressure": (
+                (1.0 - (same_height_1.fillna(0.0) + same_height_2.fillna(0.0) + same_height_3plus.fillna(0.0)) / 3.0)
+                * np.log1p(touched_count.fillna(0.0))
+            ).astype(float).to_numpy(),
             "prev_limit_up_premium": premium.fillna(0.0).astype(float).to_numpy(),
             "prev_board_premium": board_premium.fillna(0.0).astype(float).to_numpy(),
+            "prev_failed_limit_up_count": prev_failed_count.to_numpy(),
+            "prev_failed_limit_up_return": prev_failed_return.fillna(0.0).astype(float).to_numpy(),
+            "prev_failed_limit_up_red_rate": prev_failed_red_rate.fillna(0.0).astype(float).to_numpy(),
+            "prev_failed_limit_up_loss_rate": prev_failed_loss_rate.fillna(0.0).astype(float).to_numpy(),
+            "failed_limit_up_loss_pressure": (
+                prev_failed_loss_rate.fillna(0.0).astype(float)
+                * np.log1p(prev_failed_count.fillna(0.0).astype(float))
+                * np.maximum(-prev_failed_return.fillna(0.0).astype(float), 0.0)
+            ).to_numpy(),
             "prev_top20_chase_return": top20_chase_return.fillna(0.0).astype(float).to_numpy(),
             "prev_top20_chase_win_rate": top20_chase_win_rate.fillna(0.0).astype(float).to_numpy(),
             "prev_bottom20_rebound_return": bottom20_rebound_return.fillna(0.0).astype(float).to_numpy(),
@@ -467,6 +515,29 @@ def _flagged_positive_rate(values: pd.DataFrame, flag_column: str, value_column:
     return float((selected > 0.0).mean())
 
 
+def _flagged_rate(
+    values: pd.DataFrame,
+    flag_column: str,
+    value_column: str,
+    *,
+    threshold: float,
+    op: str,
+) -> float:
+    if flag_column not in values.columns or value_column not in values.columns:
+        return 0.0
+    mask = values[flag_column].fillna(False).astype(bool)
+    if not mask.any():
+        return 0.0
+    selected = pd.to_numeric(values.loc[mask, value_column], errors="coerce").dropna()
+    if selected.empty:
+        return 0.0
+    if op == "<":
+        return float((selected < float(threshold)).mean())
+    if op == ">":
+        return float((selected > float(threshold)).mean())
+    raise ValueError("op must be '<' or '>'")
+
+
 def _group_apply(grouped: pd.core.groupby.DataFrameGroupBy, func) -> pd.Series:
     try:
         return grouped.apply(func, include_groups=False)
@@ -509,6 +580,7 @@ def _market_structure_frame(frame: pd.DataFrame) -> pd.DataFrame:
     limit_down = pd.to_numeric(frame["market_limit_down_count"], errors="coerce").fillna(0.0)
     limit_down_rate = pd.to_numeric(frame["market_limit_down_rate"], errors="coerce").fillna(0.0)
     broken_rate = pd.to_numeric(frame["market_broken_board_rate"], errors="coerce").fillna(0.0)
+    leader_crash = pd.to_numeric(frame["market_high_leader_crash_count"], errors="coerce").fillna(0.0)
     emotion_score = pd.to_numeric(frame["market_emotion_score"], errors="coerce").fillna(0.0)
     premium = pd.to_numeric(frame["prev_limit_up_premium"], errors="coerce").fillna(0.0)
     amount = pd.to_numeric(frame["market_active_amount_sum"], errors="coerce").fillna(0.0)
@@ -516,6 +588,7 @@ def _market_structure_frame(frame: pd.DataFrame) -> pd.DataFrame:
     top20_chase_return = pd.to_numeric(frame["prev_top20_chase_return"], errors="coerce").fillna(0.0)
     top20_chase_win_rate = pd.to_numeric(frame["prev_top20_chase_win_rate"], errors="coerce").fillna(0.0)
     bottom20_rebound_return = pd.to_numeric(frame["prev_bottom20_rebound_return"], errors="coerce").fillna(0.0)
+    money_effect_spread_20 = pd.to_numeric(frame["money_effect_spread_20"], errors="coerce").fillna(0.0)
     new_high = pd.to_numeric(frame["market_new_high_20_count"], errors="coerce").fillna(0.0)
     new_low = pd.to_numeric(frame["market_new_low_20_count"], errors="coerce").fillna(0.0)
     advance_decline = pd.to_numeric(frame["market_advance_decline_ratio"], errors="coerce").fillna(1.0)
@@ -600,6 +673,57 @@ def _market_structure_frame(frame: pd.DataFrame) -> pd.DataFrame:
         & limit_up_recovering
         & (broken_rate <= 0.50)
     )
+    bullish_pivot_recognition = (
+        prior_decline
+        & (amount_pressure >= 1.0)
+        & (advance_decline >= 1.10)
+        & limit_up_recovering
+        & new_low_contracting
+        & (max_board >= 2.0)
+        & (broken_rate <= 0.50)
+    )
+    limit_premium_failure_signal = (
+        (advance_decline >= 1.05)
+        & (limit_up >= 10.0)
+        & (premium <= 0.0)
+        & ((top20_chase_return <= 0.0) | (top20_chase_win_rate <= 0.45))
+    )
+    bad_sentiment_no_sweep = (
+        ((frame["emotion_phase_ebbing"].astype(float) > 0.0) | (broken_rate >= 0.50) | (premium < -2.0))
+        & (limit_up < 40.0)
+        & (advance_decline < 1.20)
+    )
+    high_leader_crash_sentiment_collapse = (leader_crash > 0.0) & (
+        (broken_rate >= 0.35) | (premium < 0.0) | (advance_decline < 1.0)
+    )
+    no_theme_rotation_mode = (
+        (limit_up >= 8.0)
+        & (limit_up <= 35.0)
+        & (broken_rate < 0.55)
+        & (advance_decline >= 0.80)
+        & (advance_decline <= 1.50)
+        & (max_board <= 3.0)
+    )
+    money_effect_sector_rotation = (
+        no_theme_rotation_mode
+        & (money_effect_spread_20 > 0.0)
+        & (top20_chase_win_rate >= 0.50)
+        & (amount_pressure >= 0.80)
+    )
+    full_position_trigger = (
+        (advance_decline >= 1.50)
+        & (limit_up >= 40.0)
+        & (broken_rate <= 0.35)
+        & (amount_pressure >= 1.05)
+        & (max_board >= 2.0)
+        & (premium >= 0.0)
+    )
+    late_cycle_position_cap = (
+        ((max_board >= 4.0) & (premium >= 3.0))
+        | (frame["emotion_climax_next_day_risk"].astype(float) > 0.0)
+        | ((amount_percentile_60 >= 0.80) & (broken_rate >= 0.45))
+    )
+    bear_position_reduction = weak_market_oversold_regime | liquidity_exhaustion | high_leader_crash_sentiment_collapse
     decline_stabilize_signal = (
         prior_decline
         & new_low_contracting
@@ -637,6 +761,15 @@ def _market_structure_frame(frame: pd.DataFrame) -> pd.DataFrame:
             "weak_market_oversold_regime": weak_market_oversold_regime.astype(float),
             "bull_hotspot_bear_oversold": bull_hotspot_bear_oversold.astype(float),
             "collapse_warning_signal": collapse_warning_signal.astype(float),
+            "bullish_pivot_recognition": bullish_pivot_recognition.astype(float),
+            "limit_premium_failure_signal": limit_premium_failure_signal.astype(float),
+            "bad_sentiment_no_sweep": bad_sentiment_no_sweep.astype(float),
+            "high_leader_crash_sentiment_collapse": high_leader_crash_sentiment_collapse.astype(float),
+            "no_theme_rotation_mode": no_theme_rotation_mode.astype(float),
+            "money_effect_sector_rotation": money_effect_sector_rotation.astype(float),
+            "full_position_trigger": full_position_trigger.astype(float),
+            "late_cycle_position_cap": late_cycle_position_cap.astype(float),
+            "bear_position_reduction": bear_position_reduction.astype(float),
         },
         index=frame.index,
     )

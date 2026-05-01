@@ -1,0 +1,94 @@
+{
+  "schema_version": "frozen_forward_config_v1",
+  "status": "strong_research_candidate",
+  "frozen_at": "2026-05-02T00:00:00+08:00",
+  "frozen_artifact": "gpu_probe_20260501T155956Z_d64e3464",
+  "frozen_artifact_path": "E:\\ashare_similarity_runtime\\data\\reports\\prediction\\runs\\gpu_probe_20260501T155956Z_d64e3464",
+
+  "label": {
+    "label_target": "next_high_from_close",
+    "target_high_return_pct": 1.0,
+    "label_definition": "actual = 1 if high[t+1] >= close[t] * 1.01 else 0"
+  },
+
+  "features": {
+    "feature_set": "expanded",
+    "exclude_feature_prefix": ["cross_"],
+    "max_selected_features": 260,
+    "feature_selection_method": "stable_tail"
+  },
+
+  "model": {
+    "candidate_family": "all",
+    "best_model_selected": "gpu_catboost_compact",
+    "post_calibration": "isotonic",
+    "confidence_selector": "candidate_agreement",
+    "selector_coverage_weight": 0.02,
+    "seed": 42
+  },
+
+  "sample_filter": {
+    "main_board_only": true,
+    "short_only": true,
+    "min_turnover": 3.0,
+    "min_amount": 200000000,
+    "min_volume_z": 1.0,
+    "min_amount_z": 1.0,
+    "min_range_pct": 3.0,
+    "min_volatility_pct": 2.5,
+    "min_phase_days_3": 1,
+    "min_abnormal_flags": 2,
+    "min_active_anomaly_rank": 0.0
+  },
+
+  "lockbox": {
+    "seen_research_window": "2026-01-01 to 2026-04-29",
+    "seen_research_lockbox_role": "seen_research",
+    "seen_research_lockbox_identity_hash": "54a55ede258240b2",
+    "forward_lockbox_role": "final_unseen",
+    "forward_lockbox_identity_hash": "generated_per_forward_run",
+    "note": "2026-01~04 data is seen_research only. Forward data after freeze date uses final_unseen. The forward lockbox_identity_hash is generated at runtime for each forward run and must not reuse the seen_research hash.",
+    "forward_test_start_rule": "First A-share trading day after frozen_at. Must be confirmed from trading calendar or actual market data, not hardcoded."
+  },
+
+  "fingerprints": {
+    "code_hash": "b6f0d10418b42f53",
+    "feature_hash": "9d3e0d6a56cc39e7",
+    "data_hash": "b73f9e6257d9a9da",
+    "split_hash": "8dadcf9205592963",
+    "selector_config_hash": "09e63e1db0272c7f"
+  },
+
+  "seen_research_metrics": {
+    "test_rows": 57391,
+    "confident_accuracy": 0.8293,
+    "confident_count": 8573,
+    "confident_coverage": 0.1494,
+    "wilson_lower_95": 0.8212,
+    "brier": 0.2152,
+    "baseline_brier": 0.2229,
+    "date_bucket_median_precision": 0.8161,
+    "date_bucket_std_precision": 0.1022,
+    "date_bucket_num_dates": 72,
+    "date_bucket_dominant_dates_gt20pct": []
+  },
+
+  "acceptance_gate": {
+    "high_conf_count_min": 10000,
+    "high_conf_coverage_min": 0.10,
+    "accuracy_min": 0.75,
+    "wilson_lower_95_min": 0.75,
+    "brier_must_beat_baseline": true,
+    "lockbox_role_required": "final_unseen",
+    "gate_logic": "AND (all conditions must be met simultaneously)"
+  },
+
+  "discipline": {
+    "no_retroactive_config_change": true,
+    "no_auto_delete_backups": true,
+    "no_auto_commit_push_release": true,
+    "no_read_full_backup_jsonl": true,
+    "seen_research_max_conclusion": "strong_research_candidate",
+    "forward_only_after_freeze": true
+  }
+}

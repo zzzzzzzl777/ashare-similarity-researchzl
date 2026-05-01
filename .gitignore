@@ -27,6 +27,15 @@ CONTEXT_RECOVERY.md
 RESUME_PROMPT.md
 repair_codex_stuck_context.ps1
 codex_context_repair_backup_*/
+codex_context_guard_backup_*/
+codex_context_restore_safety_*/
+codex_target_thread_*/
+codex_visible_repair_*/
+previous_chat_full_backup.jsonl
+previous_chat_readable.txt
+package.json
+docs/handoff_*.md
+docs/live_run_state.json
 armoury_*.png
 tmp_*/
 .DS_Store

@@ -134,12 +134,21 @@ def _build_parser() -> argparse.ArgumentParser:
     gpu_probe.add_argument("--min-volatility-pct", type=float, default=2.5)
     gpu_probe.add_argument("--min-abnormal-flags", type=int, default=2)
     gpu_probe.add_argument("--min-phase-days-3", type=int, default=2)
+    gpu_probe.add_argument("--min-active-anomaly-rank", type=float, default=0.0)
     gpu_probe.add_argument("--main-board-only", action=argparse.BooleanOptionalAction, default=True)
     gpu_probe.add_argument("--min-label-return-pct", type=float, default=0.0)
+    gpu_probe.add_argument("--label-target", choices=["next_close_up", "next_high_from_close"], default="next_high_from_close")
+    gpu_probe.add_argument("--target-high-return-pct", type=float, default=1.0)
     gpu_probe.add_argument("--feature-set", choices=["legacy", "base", "expanded", "research"], default="expanded")
     gpu_probe.add_argument("--max-selected-features", type=int, default=299)
+    gpu_probe.add_argument("--feature-selection-method", choices=["abs_correlation", "stable_tail"], default="abs_correlation")
+    gpu_probe.add_argument("--candidate-family", choices=["all", "torch", "tree"], default="all")
+    gpu_probe.add_argument("--intraday-factor-frequency", choices=["1", "5", "15", "30", "60"], default="5")
     gpu_probe.add_argument("--feature-cache", action=argparse.BooleanOptionalAction, default=True)
     gpu_probe.add_argument("--refresh-feature-cache", action="store_true")
+    gpu_probe.add_argument("--lockbox-role", choices=["seen_research", "final_unseen"], default="seen_research")
+    gpu_probe.add_argument("--selector-coverage-weight", type=float, default=0.02)
+    gpu_probe.add_argument("--exclude-feature-prefix", nargs="*", default=None, help="Drop features matching any prefix before training (ablation)")
 
     prediction_build_dataset = subparsers.add_parser(
         "prediction-build-dataset",
@@ -775,12 +784,21 @@ def main() -> None:
                 min_volatility_pct=args.min_volatility_pct,
                 min_abnormal_flags=args.min_abnormal_flags,
                 min_phase_days_3=args.min_phase_days_3,
+                min_active_anomaly_rank=args.min_active_anomaly_rank,
                 main_board_only=args.main_board_only,
                 min_label_return_pct=args.min_label_return_pct,
+                label_target=args.label_target,
+                target_high_return_pct=args.target_high_return_pct,
                 feature_set=args.feature_set,
                 max_selected_features=args.max_selected_features,
+                feature_selection_method=args.feature_selection_method,
+                candidate_family=args.candidate_family,
+                intraday_factor_frequency=args.intraday_factor_frequency,
                 use_feature_cache=args.feature_cache,
                 refresh_feature_cache=args.refresh_feature_cache,
+                lockbox_role=args.lockbox_role,
+                selector_coverage_weight=args.selector_coverage_weight,
+                exclude_feature_prefix=tuple(args.exclude_feature_prefix) if args.exclude_feature_prefix else (),
             )
         )
         return

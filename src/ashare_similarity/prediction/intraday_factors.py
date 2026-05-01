@@ -3,6 +3,66 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from ashare_similarity.prediction.factor_cache_manager import FactorFrame
+
+
+INTRADAY_FACTOR_COLUMNS: tuple[str, ...] = (
+    "minute_intraday_return",
+    "minute_last_30min_return",
+    "minute_last_30min_vs_day",
+    "minute_price_1430_return",
+    "minute_late_surge_ratio",
+    "minute_late_surge_lure_risk",
+    "minute_last_5min_return",
+    "minute_last_30min_volume_ratio",
+    "minute_first_15min_return",
+    "minute_first_15min_volume_ratio",
+    "minute_midday_return",
+    "minute_afternoon_start_return",
+    "minute_closing_auction_volume_ratio",
+    "minute_vwap_deviation_eod",
+    "minute_high_point_time",
+    "minute_low_point_time",
+    "minute_intraday_close_position",
+    "minute_volume_distribution_skew",
+    "minute_volume_entropy",
+    "minute_volume_gini",
+    "minute_price_volume_corr_intraday",
+    "minute_return_autocorr_intraday",
+    "minute_realized_volatility_5min",
+    "minute_realized_skew",
+    "minute_realized_kurtosis",
+    "minute_intraday_trend_strength",
+    "minute_steady_intraday_rise_score",
+    "minute_morning_afternoon_imbalance",
+    "minute_up_volume_ratio",
+)
+
+
+def build_intraday_factor_frame(minute_bars: pd.DataFrame) -> FactorFrame:
+    factors = build_intraday_daily_factors(minute_bars)
+    if factors.empty:
+        frame = pd.DataFrame(columns=["symbol", "date", *INTRADAY_FACTOR_COLUMNS])
+    else:
+        rename = {
+            column: f"minute_{column}"
+            for column in factors.columns
+            if column not in {"symbol", "date"}
+        }
+        frame = factors.rename(columns=rename)
+        for column in INTRADAY_FACTOR_COLUMNS:
+            if column not in frame.columns:
+                frame[column] = 0.0
+        frame = frame.loc[:, ["symbol", "date", *INTRADAY_FACTOR_COLUMNS]]
+    return FactorFrame(
+        name="intraday_structure",
+        frame=frame,
+        columns=INTRADAY_FACTOR_COLUMNS,
+        source="cached_minute_bars",
+        asof_time="after_close",
+        lag_rule="T-day minute bars up to close only; usable for T+1 prediction.",
+    )
+
 
 def build_intraday_daily_factors(minute_bars: pd.DataFrame) -> pd.DataFrame:
     if minute_bars.empty or "timestamp" not in minute_bars.columns:
@@ -62,6 +122,9 @@ def build_intraday_daily_factors(minute_bars: pd.DataFrame) -> pd.DataFrame:
         avg_bar_volume = total_volume / max(float(len(group)), 1.0)
         intraday_return = _pct(day_close, day_open)
         last_30min_return = _pct(day_close, last_open)
+        price_1430 = _price_at_or_before(group, "14:30")
+        price_1430_return = _pct(day_close, price_1430) if price_1430 is not None else 0.0
+        late_surge_ratio = _safe_div(day_close - (price_1430 if price_1430 is not None else last_open), day_close - day_open)
         minute_returns = group["close"].astype(float).pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
         minute_return_pct = minute_returns * 100.0
         volumes = group["volume"].fillna(0.0).astype(float) if "volume" in group.columns else pd.Series(0.0, index=group.index)
@@ -74,6 +137,9 @@ def build_intraday_daily_factors(minute_bars: pd.DataFrame) -> pd.DataFrame:
                 "intraday_return": intraday_return,
                 "last_30min_return": last_30min_return,
                 "last_30min_vs_day": last_30min_return / max(abs(intraday_return), 0.05),
+                "price_1430_return": price_1430_return,
+                "late_surge_ratio": late_surge_ratio,
+                "late_surge_lure_risk": float(intraday_return > 0.0 and late_surge_ratio > 0.50),
                 "last_5min_return": _pct(day_close, last_5_open),
                 "last_30min_volume_ratio": last_volume / avg_30m_volume if avg_30m_volume > 0 else 0.0,
                 "first_15min_return": _pct(first_15_close, first_15_open),
@@ -98,6 +164,8 @@ def build_intraday_daily_factors(minute_bars: pd.DataFrame) -> pd.DataFrame:
                 "realized_skew": _series_skew(minute_return_pct.to_numpy()),
                 "realized_kurtosis": _series_kurtosis(minute_return_pct.to_numpy()),
                 "intraday_trend_strength": abs(intraday_return) / max(float(np.abs(minute_return_pct).sum()), 0.05),
+                "steady_intraday_rise_score": max(intraday_return, 0.0) / max(float(np.abs(minute_return_pct).sum()), 0.05)
+                * max(0.0, 1.0 - max(late_surge_ratio - 0.50, 0.0)),
                 "morning_afternoon_imbalance": _morning_afternoon_imbalance(group, volumes),
                 "up_volume_ratio": positive_volume / total_volume if total_volume > 0 else 0.0,
             }
@@ -128,6 +196,14 @@ def _window_return(group: pd.DataFrame) -> float:
     return _pct(float(group["close"].iloc[-1]), float(group["open"].iloc[0]))
 
 
+def _price_at_or_before(group: pd.DataFrame, clock_time: str) -> float | None:
+    cutoff = pd.Timestamp(clock_time).time()
+    subset = group[group["timestamp"].dt.time <= cutoff]
+    if subset.empty:
+        return None
+    return float(subset["close"].iloc[-1])
+
+
 def _session_minutes(group: pd.DataFrame) -> float:
     if len(group) <= 1:
         return 1.0
@@ -138,6 +214,12 @@ def _pct(value: float, base: float) -> float:
     if abs(base) < 1e-12:
         return 0.0
     return (value / base - 1.0) * 100.0
+
+
+def _safe_div(value: float, base: float) -> float:
+    if abs(base) < 1e-12:
+        return 0.0
+    return value / base
 
 
 def _close_position(close: float, high: float, low: float) -> float:

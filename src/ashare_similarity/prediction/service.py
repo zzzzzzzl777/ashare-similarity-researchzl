@@ -320,6 +320,8 @@ class PredictionService:
         acceptance = result.get("acceptance") if isinstance(result, dict) else None
         if not isinstance(acceptance, dict) or not acceptance.get("passed"):
             return None
+        if acceptance.get("lockbox_role") != "final_unseen" or not acceptance.get("final_acceptance_eligible"):
+            return None
         run_id = payload.get("run_id") or result.get("run_id")
         if approved_run_id and str(run_id) != str(approved_run_id):
             return None
@@ -339,6 +341,8 @@ class PredictionService:
             "baseline_brier": result.get("baseline_brier"),
             "test_rows": result.get("test_rows"),
             "target_accuracy": result.get("target_accuracy"),
+            "lockbox_role": acceptance.get("lockbox_role"),
+            "final_acceptance_eligible": acceptance.get("final_acceptance_eligible"),
         }
 
     def _resolve_request(self, request: PredictionRequest) -> PredictionRequest:
