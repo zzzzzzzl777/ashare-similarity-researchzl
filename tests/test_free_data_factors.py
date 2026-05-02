@@ -3,8 +3,12 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+import tempfile
+from pathlib import Path
 
 from ashare_similarity.prediction.free_data_factors import (
+    _build_stk_mins_factors,
+    _limit_threshold_for_symbol,
     build_board_structure_factor,
     build_cross_market_return_factor,
     build_market_emotion_factor,
@@ -207,3 +211,136 @@ def test_build_board_structure_factor_tracks_signal_system_proxies():
     assert target["explosive_vol_next_weak"].iloc[-1] == pytest.approx(1.0)
     assert "shrink_after_rotten" in factor.columns
     assert "bet_decline_exhaustion" in factor.columns
+
+
+def test_limit_threshold_varies_by_board():
+    """Bug 1 verification: ChiNext/STAR use 20%, main board uses 10%."""
+    assert _limit_threshold_for_symbol("600001") == 10.0
+    assert _limit_threshold_for_symbol("000001") == 10.0
+    assert _limit_threshold_for_symbol("300001") == 20.0
+    assert _limit_threshold_for_symbol("301001") == 20.0
+    assert _limit_threshold_for_symbol("688001") == 20.0
+    assert _limit_threshold_for_symbol("830001") == 30.0
+    assert _limit_threshold_for_symbol("430001") == 30.0
+
+    dates = pd.bdate_range("2024-01-02", periods=3)
+    rows = []
+    for symbol, base in [("600001", 10.0), ("300001", 10.0), ("688001", 10.0)]:
+        close = [base, base, base * 1.15]
+        rows.append(
+            pd.DataFrame(
+                {
+                    "symbol": symbol,
+                    "date": dates,
+                    "high": close,
+                    "low": [base, base, base * 1.10],
+                    "close": close,
+                    "volume": 1_000_000.0,
+                    "amount": 100_000_000.0,
+                    "turnover": 4.0,
+                }
+            )
+        )
+    daily = pd.concat(rows, ignore_index=True)
+
+    board = build_board_structure_factor(daily)
+    last_date = dates[-1]
+    board_last = board.frame[board.frame["date"] == last_date].set_index("symbol")
+
+    assert board_last.loc["600001", "board_count"] >= 1.0, "main board 15% should be limit-up"
+    assert board_last.loc["300001", "board_count"] == 0.0, "ChiNext 15% must NOT be limit-up (threshold 20%)"
+    assert board_last.loc["688001", "board_count"] == 0.0, "STAR 15% must NOT be limit-up (threshold 20%)"
+
+    emotion = build_market_emotion_factor(daily)
+    last_emo = emotion.frame[emotion.frame["date"] == last_date].iloc[0]
+    assert last_emo["market_limit_up_count"] == 1.0, "only main board stock hits limit"
+
+
+def test_stk_mins_last30_uses_1430_not_1445():
+    """Bug 2 verification: last 30 minutes should start at 14:30, not 14:45."""
+    import datetime as _dt
+
+    times_morning = [_dt.time(h, m) for h in range(9, 12) for m in range(0, 60, 5)
+                     if _dt.time(9, 30) <= _dt.time(h, m) <= _dt.time(11, 30)]
+    times_afternoon = [_dt.time(h, m) for h in range(13, 16) for m in range(0, 60, 5)
+                       if _dt.time(13, 5) <= _dt.time(h, m) <= _dt.time(15, 0)]
+    all_times = times_morning + times_afternoon
+    n = len(all_times)
+    date_str = "2024-06-03"
+    trade_times = [pd.Timestamp(f"{date_str} {t.strftime('%H:%M:%S')}") for t in all_times]
+    bars = pd.DataFrame({
+        "ts_code": "600001.SH",
+        "trade_time": trade_times,
+        "open": 10.0,
+        "high": 10.1,
+        "low": 9.9,
+        "close": np.linspace(10.0, 10.5, n),
+        "vol": 1000.0,
+        "amount": 10000.0,
+    })
+    with tempfile.TemporaryDirectory() as tmpdir:
+        mins_dir = Path(tmpdir) / "stk_mins_5"
+        mins_dir.mkdir()
+        bars.to_parquet(mins_dir / "600001.parquet")
+        result = _build_stk_mins_factors(Path(tmpdir))
+
+    assert len(result) == 1
+    row = result.iloc[0]
+    assert not pd.isna(row["tushare_last_30min_return"]), "last30 should have data"
+
+    last30_count = len([t for t in all_times if t >= _dt.time(14, 30)])
+    assert last30_count >= 6, f"expected >= 6 bars in last 30 min, got {last30_count}"
+
+
+def test_cross_market_foreign_indices_auto_lag():
+    """Bug 3 verification: US/VIX/CNH must auto-lag >= 1 to prevent leakage."""
+    dates = pd.bdate_range("2024-01-02", periods=6)
+    vix_data = pd.DataFrame({"date": dates, "close": [20, 21, 22, 23, 24, 25]})
+    sp500_data = pd.DataFrame({"date": dates, "close": [4500, 4510, 4520, 4530, 4540, 4550]})
+    sh_data = pd.DataFrame({"date": dates, "close": [3000, 3010, 3020, 3030, 3040, 3050]})
+
+    factor = build_cross_market_return_factor(
+        {"vix": vix_data, "sp500": sp500_data, "sh000001": sh_data}
+    )
+
+    assert "cross_vix_ret_1" in factor.columns
+    assert "cross_sp500_ret_1" in factor.columns
+    assert "cross_sh000001_ret_1" in factor.columns
+
+    frame = factor.frame.sort_values("date").reset_index(drop=True)
+    assert pd.isna(frame["cross_vix_ret_1"].iloc[1]), "vix day 1 should be NaN (lag=1)"
+    assert not pd.isna(frame["cross_vix_ret_1"].iloc[2]), "vix day 2 should have value"
+    assert pd.isna(frame["cross_sp500_ret_1"].iloc[1]), "sp500 day 1 should be NaN (lag=1)"
+    assert not pd.isna(frame["cross_sh000001_ret_1"].iloc[1]), "A-share index needs no lag"
+
+
+def test_emotion_phase_one_hot_mutually_exclusive():
+    """Bug 5 verification: emotion_phase binary indicators must be mutually exclusive."""
+    dates = pd.bdate_range("2024-01-02", periods=5)
+    rows = []
+    for idx in range(30):
+        symbol = f"600{idx:03d}"
+        close = np.full(len(dates), 10.0)
+        if idx < 5:
+            close[-1] = close[-2] * 0.90
+        elif idx >= 25:
+            close[-1] = close[-2] * 1.10
+        rows.append(
+            pd.DataFrame(
+                {
+                    "symbol": symbol,
+                    "date": dates,
+                    "high": close * 1.01,
+                    "low": close * 0.99,
+                    "close": close,
+                    "volume": 1_000_000.0,
+                    "amount": 10_000_000.0,
+                    "turnover": 3.0,
+                }
+            )
+        )
+    factor = build_market_emotion_factor(pd.concat(rows, ignore_index=True))
+    phase_cols = [c for c in factor.columns if c.startswith("emotion_phase_") and c != "emotion_phase_code"]
+    for _, row in factor.frame.iterrows():
+        total = sum(row[c] for c in phase_cols)
+        assert total <= 1.0, f"date {row['date']}: multiple emotion phases active ({total})"

@@ -8,6 +8,16 @@ import pandas as pd
 from ashare_similarity.prediction.factor_cache_manager import FactorFrame
 
 
+def _limit_threshold_for_symbol(symbol: str) -> float:
+    """Daily price-limit percentage by exchange board (same logic as factor_builder._limit_threshold_pct)."""
+    s = str(symbol).strip().zfill(6)
+    if s.startswith(("300", "301", "688")):
+        return 20.0
+    if s.startswith(("8", "4", "920")):
+        return 30.0
+    return 10.0
+
+
 MARKET_EMOTION_COLUMNS: tuple[str, ...] = (
     "market_limit_up_count",
     "market_limit_down_count",
@@ -139,11 +149,13 @@ def build_market_emotion_factor(daily_bars: pd.DataFrame) -> FactorFrame:
     rolling_close = frame.groupby("symbol", sort=False)["close"]
     frame["high_20"] = rolling_close.transform(lambda values: values.rolling(20, min_periods=5).max())
     frame["low_20"] = rolling_close.transform(lambda values: values.rolling(20, min_periods=5).min())
-    frame["limit_up_like"] = frame["ret_pct"] >= 9.5
-    frame["limit_down_like"] = frame["ret_pct"] <= -9.5
-    frame["touched_limit_up"] = (frame["high"] / frame["prev_close"] - 1.0) * 100.0 >= 9.5
+    _limit_pct = frame["symbol"].map(_limit_threshold_for_symbol)
+    _limit_thresh = _limit_pct - 0.5
+    frame["limit_up_like"] = frame["ret_pct"] >= _limit_thresh
+    frame["limit_down_like"] = frame["ret_pct"] <= -_limit_thresh
+    frame["touched_limit_up"] = (frame["high"] / frame["prev_close"] - 1.0) * 100.0 >= _limit_thresh
     frame["sealed_limit_up"] = frame["limit_up_like"] & (frame["close_position"].fillna(0.0) >= 0.95)
-    frame["one_word_board_like"] = frame["limit_up_like"] & (((frame["low"] / frame["prev_close"] - 1.0) * 100.0) >= 9.0)
+    frame["one_word_board_like"] = frame["limit_up_like"] & (((frame["low"] / frame["prev_close"] - 1.0) * 100.0) >= (_limit_pct - 1.0))
     frame["failed_limit_up"] = frame["touched_limit_up"] & ~frame["sealed_limit_up"]
     frame["new_high_20"] = frame["close"] >= frame["high_20"]
     frame["new_low_20"] = frame["close"] <= frame["low_20"]
@@ -376,6 +388,7 @@ def build_cross_market_return_factor(
     lag_days = dict(lag_days or {})
     pieces: list[pd.DataFrame] = []
     columns: list[str] = []
+    _foreign_keywords = ("us", "sp500", "spx", "nasdaq", "vix", "cnh", "usd", "hsi", "hang_seng", "a50", "ftse", "nikkei", "dax")
     for name, raw in index_frames.items():
         if raw.empty or "date" not in raw.columns or "close" not in raw.columns:
             continue
@@ -384,7 +397,8 @@ def build_cross_market_return_factor(
         frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
         frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
         frame = frame.dropna(subset=["date", "close"]).sort_values("date")
-        lag = max(int(lag_days.get(name, 0)), 0)
+        default_lag = 1 if any(kw in name.lower() for kw in _foreign_keywords) else 0
+        lag = max(int(lag_days.get(name, default_lag)), 0)
         shifted_close = frame["close"].shift(lag)
         out = pd.DataFrame({"date": frame["date"]})
         for window in (1, 3, 5):
@@ -434,9 +448,11 @@ def _prepare_daily_board_frame(daily_bars: pd.DataFrame) -> pd.DataFrame:
     frame["prev_close"] = grouped_symbol["close"].shift(1)
     frame["ret_pct"] = (frame["close"] / frame["prev_close"] - 1.0) * 100.0
     frame["close_position"] = (frame["close"] - frame["low"]) / (frame["high"] - frame["low"]).replace(0.0, np.nan)
-    frame["limit_up_like"] = frame["ret_pct"] >= 9.5
-    frame["limit_down_like"] = frame["ret_pct"] <= -9.5
-    frame["touched_limit_up"] = (frame["high"] / frame["prev_close"] - 1.0) * 100.0 >= 9.5
+    _limit_pct = frame["symbol"].map(_limit_threshold_for_symbol)
+    _limit_thresh = _limit_pct - 0.5
+    frame["limit_up_like"] = frame["ret_pct"] >= _limit_thresh
+    frame["limit_down_like"] = frame["ret_pct"] <= -_limit_thresh
+    frame["touched_limit_up"] = (frame["high"] / frame["prev_close"] - 1.0) * 100.0 >= _limit_thresh
     frame["sealed_limit_up"] = frame["limit_up_like"] & (frame["close_position"].fillna(0.0) >= 0.95)
     frame["failed_limit_up"] = frame["touched_limit_up"] & ~frame["sealed_limit_up"]
     frame["board_count"] = grouped_symbol["limit_up_like"].transform(_consecutive_true_count).astype(float)
@@ -564,12 +580,12 @@ def _emotion_phase_frame(frame: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "emotion_phase_code": code.astype(float),
-            "emotion_phase_ice": ice.astype(float),
-            "emotion_phase_trial": trial.astype(float),
-            "emotion_phase_upswing": upswing.astype(float),
-            "emotion_phase_climax": climax.astype(float),
-            "emotion_phase_divergence": divergence.astype(float),
-            "emotion_phase_ebbing": ebbing.astype(float),
+            "emotion_phase_ice": (code == 0.0).astype(float),
+            "emotion_phase_trial": (code == 1.0).astype(float),
+            "emotion_phase_upswing": (code == 2.0).astype(float),
+            "emotion_phase_climax": (code == 3.0).astype(float),
+            "emotion_phase_divergence": (code == 4.0).astype(float),
+            "emotion_phase_ebbing": (code == 5.0).astype(float),
         },
         index=frame.index,
     )
@@ -784,3 +800,537 @@ def _last_percent_rank(values: pd.Series) -> float:
 
 def _safe_name(value: str) -> str:
     return "".join(ch.lower() if ch.isalnum() else "_" for ch in str(value)).strip("_")
+
+
+# ---------------------------------------------------------------------------
+# Tushare factors (research-only)
+# ---------------------------------------------------------------------------
+
+import os
+from pathlib import Path
+
+TUSHARE_FACTOR_COLUMNS: tuple[str, ...] = (
+    # moneyflow
+    "tushare_net_mf_amount",
+    "tushare_lg_buy_sell_ratio",
+    "tushare_elg_buy_sell_ratio",
+    "tushare_mf_strength",
+    "tushare_sm_sell_pressure",
+    # limit_list_d (sparse: ~2% coverage)
+    "tushare_seal_ratio",
+    "tushare_open_times",
+    "tushare_first_time_minutes",
+    "tushare_up_stat_days",
+    "tushare_limit_type",
+    "tushare_limit_turnover",
+    # top_list + top_inst (sparse: ~2% coverage)
+    "tushare_lhb_net_buy",
+    "tushare_lhb_net_rate",
+    "tushare_lhb_appeared",
+    "tushare_inst_buy_count",
+    "tushare_inst_net_buy",
+    # hk_hold (~17% coverage)
+    "tushare_hk_ratio",
+    "tushare_hk_ratio_delta_1d",
+    # margin_detail (~36% coverage)
+    "tushare_rzye",
+    "tushare_rzye_delta_pct",
+    "tushare_rzmre_ratio",
+    "tushare_margin_net",
+    "tushare_rqye_ratio",
+    # ths_hot (~25% coverage)
+    "tushare_hot_rank",
+    "tushare_hot_value",
+    # daily_basic (high coverage)
+    "tushare_volume_ratio",
+    "tushare_free_share",
+    # cyq_perf (~55% coverage)
+    "tushare_winner_rate",
+    "tushare_cost_concentration",
+    "tushare_cost_position",
+    # stk_auction_o + stk_auction_c (high coverage)
+    "tushare_auction_open_vwap_ratio",
+    "tushare_auction_open_vol",
+    "tushare_auction_close_vwap_ratio",
+    "tushare_auction_close_vol",
+    # stk_holdernumber (quarterly, ~high coverage)
+    "tushare_holder_num",
+    "tushare_holder_num_delta_pct",
+    # stk_limit (high coverage)
+    "tushare_up_limit_distance",
+    "tushare_down_limit_distance",
+    "tushare_limit_range",
+    # stk_mins_5 (5min bars, coverage depends on pull progress)
+    "tushare_last_30min_return",
+    "tushare_first_15min_volume_ratio",
+    "tushare_vwap_deviation",
+    "tushare_intraday_volatility",
+    "tushare_up_volume_ratio",
+    "tushare_high_time_pct",
+    "tushare_close_vs_vwap",
+)
+
+
+def _load_tushare_daily_parquets(
+    api_dir: str | Path,
+    columns: list[str] | None = None,
+) -> pd.DataFrame:
+    api_dir = Path(api_dir)
+    if not api_dir.is_dir():
+        return pd.DataFrame()
+    files = sorted(api_dir.glob("*.parquet"))
+    if not files:
+        return pd.DataFrame()
+    dfs = [pd.read_parquet(f, columns=columns) for f in files]
+    return pd.concat(dfs, ignore_index=True)
+
+
+def _load_tushare_stock_parquets(
+    api_dir: str | Path,
+    columns: list[str] | None = None,
+) -> pd.DataFrame:
+    api_dir = Path(api_dir)
+    if not api_dir.is_dir():
+        return pd.DataFrame()
+    files = sorted(api_dir.glob("*.parquet"))
+    if not files:
+        return pd.DataFrame()
+    dfs = [pd.read_parquet(f) for f in files]
+    return pd.concat(dfs, ignore_index=True)
+
+
+def _ts_code_to_symbol(ts_code: pd.Series) -> pd.Series:
+    return ts_code.astype(str).str.split(".").str[0].str.zfill(6)
+
+
+def _trade_date_to_date(trade_date: pd.Series) -> pd.Series:
+    return pd.to_datetime(trade_date.astype(str), format="%Y%m%d", errors="coerce")
+
+
+def _parse_first_time_minutes(series: pd.Series) -> pd.Series:
+    def _parse(t):
+        if pd.isna(t) or t is None or str(t).strip() in ("", "None", "nan"):
+            return float("nan")
+        s = str(t).strip().zfill(6)
+        try:
+            return int(s[:2]) * 60 + int(s[2:4]) + int(s[4:6]) / 60.0
+        except (ValueError, IndexError):
+            return float("nan")
+    return series.map(_parse)
+
+
+def _parse_up_stat_days(series: pd.Series) -> pd.Series:
+    def _parse(s):
+        if pd.isna(s):
+            return 0.0
+        s = str(s).strip()
+        if "/" not in s:
+            return 0.0
+        try:
+            return float(s.split("/")[0])
+        except (ValueError, IndexError):
+            return 0.0
+    return series.map(_parse)
+
+
+def _build_moneyflow_factors(tushare_dir: Path) -> pd.DataFrame:
+    df = _load_tushare_daily_parquets(tushare_dir / "moneyflow")
+    if df.empty:
+        return pd.DataFrame()
+    df["symbol"] = _ts_code_to_symbol(df["ts_code"])
+    df["date"] = _trade_date_to_date(df["trade_date"])
+    for col in ("net_mf_amount", "buy_lg_amount", "sell_lg_amount",
+                "buy_elg_amount", "sell_elg_amount", "buy_sm_amount", "sell_sm_amount"):
+        df[col] = pd.to_numeric(df.get(col), errors="coerce").fillna(0.0)
+    big_buy = df["buy_lg_amount"] + df["buy_elg_amount"]
+    big_sell = df["sell_lg_amount"] + df["sell_elg_amount"]
+    out = pd.DataFrame({
+        "symbol": df["symbol"],
+        "date": df["date"],
+        "tushare_net_mf_amount": df["net_mf_amount"],
+        "tushare_lg_buy_sell_ratio": (df["buy_lg_amount"] / np.maximum(df["sell_lg_amount"], 100.0)).clip(upper=50.0),
+        "tushare_elg_buy_sell_ratio": (df["buy_elg_amount"] / np.maximum(df["sell_elg_amount"], 100.0)).clip(upper=50.0),
+        "tushare_mf_strength": (big_buy - big_sell) / np.maximum(big_buy + big_sell, 1.0),
+        "tushare_sm_sell_pressure": df["sell_sm_amount"] / np.maximum(df["buy_sm_amount"] + df["sell_sm_amount"], 1.0),
+    })
+    return out.dropna(subset=["date"])
+
+
+def _build_limit_factors(tushare_dir: Path) -> pd.DataFrame:
+    df = _load_tushare_daily_parquets(tushare_dir / "limit_list_d")
+    if df.empty:
+        return pd.DataFrame()
+    df["symbol"] = _ts_code_to_symbol(df["ts_code"])
+    df["date"] = _trade_date_to_date(df["trade_date"])
+    for col in ("fd_amount", "float_mv", "amount", "open_times"):
+        df[col] = pd.to_numeric(df.get(col), errors="coerce")
+    limit_enc = df.get("limit", pd.Series(dtype=str)).map({"U": 1.0, "D": -1.0, "Z": 0.0}).fillna(0.0)
+    out = pd.DataFrame({
+        "symbol": df["symbol"],
+        "date": df["date"],
+        "tushare_seal_ratio": df["fd_amount"] / np.maximum(df["float_mv"], 1.0),
+        "tushare_open_times": df["open_times"].fillna(0.0),
+        "tushare_first_time_minutes": _parse_first_time_minutes(df.get("first_time", pd.Series(dtype=str))),
+        "tushare_up_stat_days": _parse_up_stat_days(df.get("up_stat", pd.Series(dtype=str))),
+        "tushare_limit_type": limit_enc,
+        "tushare_limit_turnover": df["amount"] / np.maximum(df["float_mv"], 1.0),
+    })
+    return out.dropna(subset=["date"])
+
+
+def _build_lhb_factors(tushare_dir: Path) -> pd.DataFrame:
+    top = _load_tushare_daily_parquets(tushare_dir / "top_list")
+    inst = _load_tushare_daily_parquets(tushare_dir / "top_inst")
+    if top.empty:
+        return pd.DataFrame()
+    top["symbol"] = _ts_code_to_symbol(top["ts_code"])
+    top["date"] = _trade_date_to_date(top["trade_date"])
+    for col in ("l_buy", "l_sell", "net_rate"):
+        top[col] = pd.to_numeric(top.get(col), errors="coerce").fillna(0.0)
+    out = pd.DataFrame({
+        "symbol": top["symbol"],
+        "date": top["date"],
+        "tushare_lhb_net_buy": top["l_buy"] - top["l_sell"],
+        "tushare_lhb_net_rate": top.get("net_rate", 0.0),
+        "tushare_lhb_appeared": 1.0,
+    })
+    if not inst.empty:
+        inst["symbol"] = _ts_code_to_symbol(inst["ts_code"])
+        inst["date"] = _trade_date_to_date(inst["trade_date"])
+        inst["net_buy"] = pd.to_numeric(inst.get("net_buy"), errors="coerce").fillna(0.0)
+        inst["side"] = pd.to_numeric(inst.get("side"), errors="coerce").fillna(0.0)
+        buy_side = inst[inst["side"] == 0.0]
+        if not buy_side.empty:
+            agg = buy_side.groupby(["symbol", "date"], sort=False).agg(
+                tushare_inst_buy_count=("net_buy", "count"),
+                tushare_inst_net_buy=("net_buy", "sum"),
+            ).reset_index()
+            out = out.merge(agg, on=["symbol", "date"], how="left")
+    if "tushare_inst_buy_count" not in out.columns:
+        out["tushare_inst_buy_count"] = 0.0
+    if "tushare_inst_net_buy" not in out.columns:
+        out["tushare_inst_net_buy"] = 0.0
+    return out.dropna(subset=["date"])
+
+
+def _build_hk_hold_factors(tushare_dir: Path) -> pd.DataFrame:
+    df = _load_tushare_daily_parquets(tushare_dir / "hk_hold")
+    if df.empty:
+        return pd.DataFrame()
+    df["symbol"] = _ts_code_to_symbol(df["ts_code"])
+    df["date"] = _trade_date_to_date(df["trade_date"])
+    df["ratio"] = pd.to_numeric(df.get("ratio"), errors="coerce")
+    df = df.sort_values(["symbol", "date"]).reset_index(drop=True)
+    df["tushare_hk_ratio_delta_1d"] = df.groupby("symbol", sort=False)["ratio"].diff()
+    out = pd.DataFrame({
+        "symbol": df["symbol"],
+        "date": df["date"],
+        "tushare_hk_ratio": df["ratio"],
+        "tushare_hk_ratio_delta_1d": df["tushare_hk_ratio_delta_1d"],
+    })
+    return out.dropna(subset=["date"])
+
+
+def _build_margin_factors(tushare_dir: Path) -> pd.DataFrame:
+    df = _load_tushare_daily_parquets(tushare_dir / "margin_detail")
+    if df.empty:
+        return pd.DataFrame()
+    df["symbol"] = _ts_code_to_symbol(df["ts_code"])
+    df["date"] = _trade_date_to_date(df["trade_date"])
+    for col in ("rzye", "rzmre", "rzche", "rqye", "rzrqye"):
+        df[col] = pd.to_numeric(df.get(col), errors="coerce").fillna(0.0)
+    df = df.sort_values(["symbol", "date"]).reset_index(drop=True)
+    prev_rzye = df.groupby("symbol", sort=False)["rzye"].shift(1)
+    out = pd.DataFrame({
+        "symbol": df["symbol"],
+        "date": df["date"],
+        "tushare_rzye": df["rzye"],
+        "tushare_rzye_delta_pct": ((df["rzye"] - prev_rzye) / np.maximum(prev_rzye.abs(), 1.0)) * 100.0,
+        "tushare_rzmre_ratio": df["rzmre"] / np.maximum(df["rzye"], 1.0),
+        "tushare_margin_net": df["rzmre"] - df["rzche"],
+        "tushare_rqye_ratio": df["rqye"] / np.maximum(df["rzrqye"], 1.0),
+    })
+    return out.dropna(subset=["date"])
+
+
+def _build_ths_hot_factors(tushare_dir: Path) -> pd.DataFrame:
+    df = _load_tushare_daily_parquets(tushare_dir / "ths_hot")
+    if df.empty:
+        return pd.DataFrame()
+    df["symbol"] = _ts_code_to_symbol(df["ts_code"])
+    df["date"] = _trade_date_to_date(df["trade_date"])
+    df["rank"] = pd.to_numeric(df.get("rank"), errors="coerce")
+    df["hot"] = pd.to_numeric(df.get("hot"), errors="coerce")
+    out = df.groupby(["symbol", "date"], sort=False).agg(
+        tushare_hot_rank=("rank", "min"),
+        tushare_hot_value=("hot", "max"),
+    ).reset_index()
+    return out.dropna(subset=["date"])
+
+
+def _build_daily_basic_factors(tushare_dir: Path) -> pd.DataFrame:
+    df = _load_tushare_daily_parquets(tushare_dir / "daily_basic")
+    if df.empty:
+        return pd.DataFrame()
+    df["symbol"] = _ts_code_to_symbol(df["ts_code"])
+    df["date"] = _trade_date_to_date(df["trade_date"])
+    out = pd.DataFrame({
+        "symbol": df["symbol"],
+        "date": df["date"],
+        "tushare_volume_ratio": pd.to_numeric(df.get("volume_ratio"), errors="coerce"),
+        "tushare_free_share": pd.to_numeric(df.get("free_share"), errors="coerce"),
+    })
+    return out.dropna(subset=["date"])
+
+
+def _build_cyq_factors(tushare_dir: Path) -> pd.DataFrame:
+    df = _load_tushare_stock_parquets(tushare_dir / "cyq_perf")
+    if df.empty:
+        return pd.DataFrame()
+    df["symbol"] = _ts_code_to_symbol(df["ts_code"])
+    df["date"] = _trade_date_to_date(df["trade_date"])
+    for col in ("winner_rate", "cost_85pct", "cost_15pct", "cost_50pct"):
+        df[col] = pd.to_numeric(df.get(col), errors="coerce")
+    close = pd.to_numeric(df.get("weight_avg"), errors="coerce")
+    out = pd.DataFrame({
+        "symbol": df["symbol"],
+        "date": df["date"],
+        "tushare_winner_rate": df["winner_rate"],
+        "tushare_cost_concentration": df["cost_85pct"] / np.maximum(df["cost_15pct"], 0.01),
+        "tushare_cost_position": (close - df["cost_50pct"]) / np.maximum(df["cost_50pct"].abs(), 0.01),
+    })
+    return out.dropna(subset=["date"])
+
+
+def _build_auction_factors(tushare_dir: Path) -> pd.DataFrame:
+    ao = _load_tushare_daily_parquets(
+        tushare_dir / "stk_auction_o",
+        columns=["ts_code", "trade_date", "vwap", "vol", "close"],
+    )
+    ac = _load_tushare_daily_parquets(
+        tushare_dir / "stk_auction_c",
+        columns=["ts_code", "trade_date", "vwap", "vol", "close"],
+    )
+    pieces = []
+    if not ao.empty:
+        ao["symbol"] = _ts_code_to_symbol(ao["ts_code"])
+        ao["date"] = _trade_date_to_date(ao["trade_date"])
+        ao["vwap"] = pd.to_numeric(ao["vwap"], errors="coerce")
+        ao["vol"] = pd.to_numeric(ao["vol"], errors="coerce")
+        ao["close"] = pd.to_numeric(ao["close"], errors="coerce")
+        pieces.append(pd.DataFrame({
+            "symbol": ao["symbol"],
+            "date": ao["date"],
+            "tushare_auction_open_vwap_ratio": ao["vwap"] / ao["close"].clip(lower=0.01),
+            "tushare_auction_open_vol": ao["vol"],
+        }))
+    if not ac.empty:
+        ac["symbol"] = _ts_code_to_symbol(ac["ts_code"])
+        ac["date"] = _trade_date_to_date(ac["trade_date"])
+        ac["vwap"] = pd.to_numeric(ac["vwap"], errors="coerce")
+        ac["vol"] = pd.to_numeric(ac["vol"], errors="coerce")
+        ac["close"] = pd.to_numeric(ac["close"], errors="coerce")
+        pieces.append(pd.DataFrame({
+            "symbol": ac["symbol"],
+            "date": ac["date"],
+            "tushare_auction_close_vwap_ratio": ac["vwap"] / ac["close"].clip(lower=0.01),
+            "tushare_auction_close_vol": ac["vol"],
+        }))
+    if not pieces:
+        return pd.DataFrame()
+    merged = pieces[0]
+    for p in pieces[1:]:
+        merged = merged.merge(p, on=["symbol", "date"], how="outer")
+    return merged.dropna(subset=["date"])
+
+
+def _build_holdernumber_factors(tushare_dir: Path) -> pd.DataFrame:
+    df = _load_tushare_daily_parquets(
+        tushare_dir / "stk_holdernumber",
+        columns=["ts_code", "end_date", "holder_num"],
+    )
+    if df.empty:
+        return pd.DataFrame()
+    # stk_holdernumber: same end_date appears across multiple trade_date parquets
+    df = df.drop_duplicates(subset=["ts_code", "end_date"], keep="last")
+    df["symbol"] = _ts_code_to_symbol(df["ts_code"])
+    df["date"] = _trade_date_to_date(df["end_date"])
+    df["holder_num"] = pd.to_numeric(df["holder_num"], errors="coerce")
+    df = df.sort_values(["symbol", "date"])
+    df["prev_holder_num"] = df.groupby("symbol")["holder_num"].shift(1)
+    out = pd.DataFrame({
+        "symbol": df["symbol"],
+        "date": df["date"],
+        "tushare_holder_num": df["holder_num"],
+        "tushare_holder_num_delta_pct": (
+            (df["holder_num"] - df["prev_holder_num"])
+            / df["prev_holder_num"].clip(lower=1)
+        ),
+    })
+    return out.dropna(subset=["date"])
+
+
+def _build_stk_limit_factors(tushare_dir: Path) -> pd.DataFrame:
+    df = _load_tushare_daily_parquets(
+        tushare_dir / "stk_limit",
+        columns=["ts_code", "trade_date", "up_limit", "down_limit"],
+    )
+    if df.empty:
+        return pd.DataFrame()
+    df["symbol"] = _ts_code_to_symbol(df["ts_code"])
+    df["date"] = _trade_date_to_date(df["trade_date"])
+    df["up_limit"] = pd.to_numeric(df["up_limit"], errors="coerce")
+    df["down_limit"] = pd.to_numeric(df["down_limit"], errors="coerce")
+    implied_close = (df["up_limit"] + df["down_limit"]) / 2
+    out = pd.DataFrame({
+        "symbol": df["symbol"],
+        "date": df["date"],
+        "tushare_up_limit_distance": (df["up_limit"] - implied_close) / implied_close.clip(lower=0.01),
+        "tushare_down_limit_distance": (implied_close - df["down_limit"]) / implied_close.clip(lower=0.01),
+        "tushare_limit_range": (df["up_limit"] - df["down_limit"]) / implied_close.clip(lower=0.01),
+    })
+    return out.dropna(subset=["date"])
+
+
+def _build_stk_mins_factors(tushare_dir: Path) -> pd.DataFrame:
+    import datetime as _dt
+    mins_dir = tushare_dir / "stk_mins_5"
+    if not mins_dir.is_dir():
+        return pd.DataFrame()
+    files = sorted(mins_dir.glob("*.parquet"))
+    if not files:
+        return pd.DataFrame()
+    chunks: list[pd.DataFrame] = []
+    for f in files:
+        try:
+            chunk = pd.read_parquet(f)
+        except Exception:
+            continue
+        if chunk.empty:
+            continue
+        chunks.append(chunk)
+    if not chunks:
+        return pd.DataFrame()
+    bars = pd.concat(chunks, ignore_index=True)
+    bars["trade_time"] = pd.to_datetime(bars["trade_time"], errors="coerce")
+    for col in ("close", "open", "high", "low", "vol", "amount"):
+        bars[col] = pd.to_numeric(bars.get(col), errors="coerce")
+    bars["symbol"] = bars["ts_code"].astype(str).str.split(".").str[0].str.zfill(6)
+    bars["trade_date"] = bars["trade_time"].dt.date
+    bars["time"] = bars["trade_time"].dt.time
+    bars = bars.dropna(subset=["trade_date", "close"]).sort_values(["symbol", "trade_date", "trade_time"])
+
+    t_1430 = _dt.time(14, 30)
+    t_0945 = _dt.time(9, 45)
+
+    gk = ["symbol", "trade_date"]
+    grouped = bars.groupby(gk, sort=False)
+    day_stats = grouped.agg(
+        bar_count=("close", "size"),
+        day_vol=("vol", "sum"),
+        day_amount=("amount", "sum"),
+        eod_close=("close", "last"),
+    ).reset_index()
+    day_stats = day_stats[(day_stats["bar_count"] >= 5) & (day_stats["day_vol"] > 0)].copy()
+    day_stats["vwap"] = day_stats["day_amount"] / day_stats["day_vol"]
+
+    last30 = bars[bars["time"] >= t_1430].groupby(gk, sort=False).agg(
+        l30_open=("open", "first"),
+        l30_close=("close", "last"),
+        l30_count=("close", "size"),
+    ).reset_index()
+    last30["tushare_last_30min_return"] = np.where(
+        last30["l30_count"] >= 2, last30["l30_close"] / last30["l30_open"] - 1, np.nan
+    )
+
+    first15 = bars[bars["time"] <= t_0945].groupby(gk, sort=False).agg(
+        f15_vol=("vol", "sum"),
+    ).reset_index()
+
+    up_bars = bars[bars["close"] > bars["open"]].groupby(gk, sort=False).agg(
+        up_vol=("vol", "sum"),
+    ).reset_index()
+
+    bars["_bar_pos"] = grouped.cumcount()
+    high_rows = bars.loc[bars.groupby(gk, sort=False)["high"].idxmax(), gk + ["_bar_pos"]].copy()
+    high_rows.rename(columns={"_bar_pos": "high_pos"}, inplace=True)
+
+    bars["_ret"] = grouped["close"].pct_change()
+    vol_stats = bars.groupby(gk, sort=False)["_ret"].std().reset_index()
+    vol_stats.rename(columns={"_ret": "tushare_intraday_volatility"}, inplace=True)
+
+    result = day_stats.merge(last30[gk + ["tushare_last_30min_return"]], on=gk, how="left")
+    result = result.merge(first15, on=gk, how="left")
+    result["tushare_first_15min_volume_ratio"] = result["f15_vol"] / result["day_vol"]
+    result = result.merge(up_bars, on=gk, how="left")
+    result["tushare_up_volume_ratio"] = result["up_vol"].fillna(0) / result["day_vol"]
+    result = result.merge(high_rows, on=gk, how="left")
+    result["tushare_high_time_pct"] = result["high_pos"] / np.maximum(result["bar_count"] - 1, 1)
+    result = result.merge(vol_stats, on=gk, how="left")
+    result["tushare_vwap_deviation"] = (result["eod_close"] - result["vwap"]) / np.maximum(np.abs(result["vwap"]), 0.01)
+    result["tushare_close_vs_vwap"] = (result["eod_close"] / np.maximum(result["vwap"], 0.01)) - 1.0
+    result["date"] = pd.to_datetime(result["trade_date"])
+    out_cols = [
+        "symbol", "date",
+        "tushare_last_30min_return", "tushare_first_15min_volume_ratio",
+        "tushare_vwap_deviation", "tushare_intraday_volatility",
+        "tushare_up_volume_ratio", "tushare_high_time_pct", "tushare_close_vs_vwap",
+    ]
+    return result[out_cols].copy()
+
+
+def build_tushare_factors(tushare_dir: str | Path) -> FactorFrame:
+    """Build all Tushare-derived factors from cached parquets.
+
+    Data directory: E:\\ashare_similarity_runtime\\data\\cache\\prediction\\tushare\\
+    """
+    tushare_dir = Path(tushare_dir)
+    builders = [
+        _build_moneyflow_factors,
+        _build_limit_factors,
+        _build_lhb_factors,
+        _build_auction_factors,
+        _build_holdernumber_factors,
+        _build_stk_limit_factors,
+        _build_hk_hold_factors,
+        _build_margin_factors,
+        _build_ths_hot_factors,
+        _build_daily_basic_factors,
+        _build_cyq_factors,
+        _build_stk_mins_factors,
+    ]
+    pieces: list[pd.DataFrame] = []
+    for builder in builders:
+        try:
+            piece = builder(tushare_dir)
+            if not piece.empty:
+                pieces.append(piece)
+        except Exception:
+            continue
+    if not pieces:
+        empty = pd.DataFrame(columns=["symbol", "date", *TUSHARE_FACTOR_COLUMNS])
+        return FactorFrame(
+            name="tushare_factors",
+            frame=empty,
+            columns=TUSHARE_FACTOR_COLUMNS,
+            source="tushare_parquet",
+            asof_time="after_close",
+            lag_rule="T day Tushare data; use for T+1 prediction only",
+            join_keys=("symbol", "date"),
+        )
+    merged = pieces[0]
+    for piece in pieces[1:]:
+        factor_cols = [c for c in piece.columns if c not in ("symbol", "date")]
+        merged = merged.merge(piece[["symbol", "date", *factor_cols]], on=["symbol", "date"], how="outer")
+    for col in TUSHARE_FACTOR_COLUMNS:
+        if col not in merged.columns:
+            merged[col] = np.nan
+    return FactorFrame(
+        name="tushare_factors",
+        frame=merged[["symbol", "date", *TUSHARE_FACTOR_COLUMNS]].copy(),
+        columns=TUSHARE_FACTOR_COLUMNS,
+        source="tushare_parquet",
+        asof_time="after_close",
+        lag_rule="T day Tushare data; use for T+1 prediction only",
+        join_keys=("symbol", "date"),
+    )

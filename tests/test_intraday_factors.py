@@ -3,7 +3,11 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from ashare_similarity.prediction.intraday_factors import build_intraday_daily_factors, build_intraday_factor_frame
+from ashare_similarity.prediction.intraday_factors import (
+    _last_minutes,
+    build_intraday_daily_factors,
+    build_intraday_factor_frame,
+)
 
 
 def test_build_intraday_daily_factors_extracts_tail_session_signal():
@@ -67,3 +71,23 @@ def test_build_intraday_factor_frame_prefixes_columns_for_merge_safety():
     assert "minute_intraday_return" in factor.columns
     assert "intraday_return" not in factor.columns
     assert "minute_last_30min_return" in factor.frame.columns
+
+
+def test_last_minutes_handles_lunch_break():
+    """Bug 4 verification: _last_minutes must use bar count, not timedelta."""
+    morning = pd.date_range("2024-06-03 09:30", "2024-06-03 11:30", freq="5min")
+    afternoon = pd.date_range("2024-06-03 13:00", "2024-06-03 13:15", freq="5min")
+    timestamps = morning.append(afternoon)
+    n = len(timestamps)
+    group = pd.DataFrame({
+        "timestamp": timestamps,
+        "open": 10.0,
+        "high": 10.1,
+        "low": 9.9,
+        "close": np.linspace(10.0, 10.5, n),
+        "volume": 1000.0,
+    })
+    result = _last_minutes(group, minutes=30)
+    assert len(result) == 6, f"expected 6 bars for 30 min with 5-min bars, got {len(result)}"
+    assert result["timestamp"].iloc[0] >= pd.Timestamp("2024-06-03 11:00")
+

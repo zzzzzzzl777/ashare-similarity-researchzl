@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import sqrt
+from math import ceil, sqrt
 from typing import Any
 
 
@@ -11,7 +11,7 @@ WILSON_95_Z = 1.959963984540054
 @dataclass(frozen=True, slots=True)
 class AcceptanceThresholds:
     target_accuracy: float = 0.75
-    desired_lockbox_rows: int = 50_000
+    legacy_default_test_rows: int = 50_000
     high_confidence_min_rows: int = 10_000
     high_confidence_min_coverage: float = 0.10
     statistical_min_rows: int = 1_000
@@ -88,6 +88,8 @@ def build_prediction_acceptance(
     count_consistent = 0 <= confident_count <= test_rows
     future_filter_allowed = False
 
+    min_implied = ceil(int(thresholds.high_confidence_min_rows) / float(thresholds.high_confidence_min_coverage))
+
     passed = bool(
         high_accuracy_met
         and high_brier_met
@@ -102,7 +104,8 @@ def build_prediction_acceptance(
         "passed": passed,
         "status": "passed" if passed else "failed",
         "target_accuracy": float(target),
-        "desired_test_rows": int(thresholds.desired_lockbox_rows),
+        "legacy_default_test_rows": int(thresholds.legacy_default_test_rows),
+        "minimum_test_rows_implied_by_hc_gate": int(min_implied),
         "required_test_rows": int(required_test_rows),
         "actual_test_rows": int(test_rows),
         "test_rows_met": bool(sample_target_met),

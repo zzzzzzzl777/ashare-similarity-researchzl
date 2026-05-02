@@ -18,9 +18,11 @@ from ashare_similarity.prediction.factor_cache_manager import merge_factor_frame
 from ashare_similarity.prediction.free_data_factors import (
     BOARD_STRUCTURE_COLUMNS,
     MARKET_EMOTION_COLUMNS,
+    TUSHARE_FACTOR_COLUMNS,
     build_board_structure_factor,
     build_cross_market_return_factor,
     build_market_emotion_factor,
+    build_tushare_factors,
 )
 from ashare_similarity.prediction.intraday_factors import (
     INTRADAY_FACTOR_COLUMNS,
@@ -32,6 +34,16 @@ from ashare_similarity.prediction.limit_pool_snapshots import (
     build_limit_pool_snapshot_factors,
     load_snapshot_bundles,
 )
+from ashare_similarity.prediction.tgb_daily_factors import (
+    TGB_MARKET_COLUMNS,
+    TGB_STOCK_COLUMNS,
+    build_tgb_market_regime_factors,
+    build_tgb_stock_factors,
+)
+from ashare_similarity.prediction.ths_sector_factors import (
+    THS_SECTOR_COLUMNS,
+    build_ths_sector_factors,
+)
 from ashare_similarity.prediction.split_protocol import (
     SplitProtocolConfig,
     SplitProtocolError,
@@ -40,7 +52,8 @@ from ashare_similarity.prediction.split_protocol import (
 
 
 MIN_GPU_PROBE_TARGET_ACCURACY = 0.75
-DESIRED_GPU_PROBE_TEST_ROWS = 50_000
+LEGACY_DEFAULT_GPU_PROBE_TEST_ROWS = 50_000
+RECOMMENDED_GPU_PROBE_TEST_ROWS = 120_000
 MIN_GPU_PROBE_TEST_ROWS = 1
 MIN_GPU_PROBE_HIGH_CONFIDENCE_ROWS = 10_000
 MIN_GPU_PROBE_HIGH_CONFIDENCE_COVERAGE = 0.10
@@ -301,10 +314,22 @@ GPU_PROBE_RESEARCH_DAILY_FACTOR_FEATURES: tuple[str, ...] = (
 GPU_PROBE_ALL_DAILY_FACTOR_FEATURES: tuple[str, ...] = tuple(
     dict.fromkeys((*GPU_PROBE_STABLE_DAILY_FACTOR_FEATURES, *GPU_PROBE_RESEARCH_DAILY_FACTOR_FEATURES))
 )
+GPU_PROBE_TGB_FACTOR_FEATURES: tuple[str, ...] = (
+    *TGB_STOCK_COLUMNS,
+    *(f"{column}_available" for column in TGB_STOCK_COLUMNS),
+    *TGB_MARKET_COLUMNS,
+    *(f"{column}_available" for column in TGB_MARKET_COLUMNS),
+)
+GPU_PROBE_THS_SECTOR_FEATURES: tuple[str, ...] = (
+    *THS_SECTOR_COLUMNS,
+    *(f"{column}_available" for column in THS_SECTOR_COLUMNS),
+)
 GPU_PROBE_FREE_FACTOR_FEATURES: tuple[str, ...] = (
     *GPU_PROBE_STABLE_DAILY_FACTOR_FEATURES,
     *GPU_PROBE_CROSS_MARKET_FEATURES,
     *(f"{column}_available" for column in GPU_PROBE_CROSS_MARKET_FEATURES),
+    *GPU_PROBE_TGB_FACTOR_FEATURES,
+    *GPU_PROBE_THS_SECTOR_FEATURES,
 )
 GPU_PROBE_RESEARCH_FREE_FACTOR_FEATURES: tuple[str, ...] = (
     *GPU_PROBE_FREE_FACTOR_FEATURES,
@@ -324,7 +349,10 @@ GPU_PROBE_INTRADAY_FACTOR_FEATURES: tuple[str, ...] = (
     *INTRADAY_FACTOR_COLUMNS,
     *(f"{column}_available" for column in INTRADAY_FACTOR_COLUMNS),
 )
-
+GPU_PROBE_TUSHARE_FACTOR_FEATURES: tuple[str, ...] = (
+    *TUSHARE_FACTOR_COLUMNS,
+    *(f"{column}_available" for column in TUSHARE_FACTOR_COLUMNS),
+)
 
 GPU_PROBE_FEATURES: tuple[str, ...] = (
     "ret_1",
@@ -577,6 +605,11 @@ GPU_PROBE_FEATURES: tuple[str, ...] = (
     "money_effect_chase_alignment",
     "collapse_hot_stock_risk",
     "weak_rebound_money_effect",
+    "max_return_1d_20",
+    "max_return_5d_60",
+    "corwin_schultz_spread",
+    "realized_skew_20",
+    "limit_up_double_shot",
     *GPU_PROBE_RESEARCH_CROSS_SECTION_FACTOR_COLUMNS,
     *GPU_PROBE_FREE_FACTOR_FEATURES,
 )
@@ -585,6 +618,7 @@ GPU_PROBE_RESEARCH_FEATURES: tuple[str, ...] = (
     *GPU_PROBE_RESEARCH_DAILY_FACTOR_FEATURES,
     *GPU_PROBE_LIMIT_POOL_FACTOR_FEATURES,
     *GPU_PROBE_INTRADAY_FACTOR_FEATURES,
+    *GPU_PROBE_TUSHARE_FACTOR_FEATURES,
 )
 GPU_PROBE_ALL_FEATURES: tuple[str, ...] = tuple(dict.fromkeys((*GPU_PROBE_RESEARCH_FEATURES,)))
 GPU_PROBE_CROSS_SECTION_FEATURES: tuple[str, ...] = tuple(
@@ -718,7 +752,7 @@ class GpuProbeConfig:
     test_start: date
     end: date
     train_rows: int = 300_000
-    test_rows: int = 50_000
+    test_rows: int = 120_000
     seed: int = 42
     max_symbols: int | None = None
     epochs: int = 160
@@ -759,7 +793,7 @@ def run_gpu_next_day_probe(store: LocalDataStore, config: GpuProbeConfig) -> dic
             "errors": config_errors,
             "minimum_target_accuracy": MIN_GPU_PROBE_TARGET_ACCURACY,
             "minimum_test_rows": MIN_GPU_PROBE_TEST_ROWS,
-            "desired_test_rows": DESIRED_GPU_PROBE_TEST_ROWS,
+            "legacy_default_test_rows": LEGACY_DEFAULT_GPU_PROBE_TEST_ROWS,
         }
 
     try:
@@ -839,10 +873,18 @@ def run_gpu_next_day_probe(store: LocalDataStore, config: GpuProbeConfig) -> dic
             data, free_factor_reports = _attach_free_factor_features(data, daily_context_frames=factor_context_frames)
             data, market_index_reports = _attach_cached_market_index_features(data, store=store, config=config)
             free_factor_reports.extend(market_index_reports)
-            data, limit_pool_reports = _attach_limit_pool_snapshot_features(data, store=store)
-            free_factor_reports.extend(limit_pool_reports)
-            data, intraday_reports = _attach_intraday_factor_features(data, store=store, config=config)
-            free_factor_reports.extend(intraday_reports)
+            if _uses_expanded_cached_factors(config):
+                data, tgb_reports = _attach_tgb_factor_features(data, daily_context_frames=factor_context_frames)
+                free_factor_reports.extend(tgb_reports)
+                data, ths_sector_reports = _attach_ths_sector_features(data, store=store)
+                free_factor_reports.extend(ths_sector_reports)
+            if _uses_research_external_factors(config):
+                data, limit_pool_reports = _attach_limit_pool_snapshot_features(data, store=store)
+                free_factor_reports.extend(limit_pool_reports)
+                data, intraday_reports = _attach_intraday_factor_features(data, store=store, config=config)
+                free_factor_reports.extend(intraday_reports)
+                data, tushare_reports = _attach_tushare_factor_features(data, store=store)
+                free_factor_reports.extend(tushare_reports)
             data = _ensure_feature_columns(_add_cross_section_features(data))
             _write_feature_cache(
                 feature_cache,
@@ -973,7 +1015,7 @@ def run_gpu_next_day_probe(store: LocalDataStore, config: GpuProbeConfig) -> dic
             "requested_test_rows": int(config.test_rows),
             "required_test_rows": int(effective_test_rows),
             "minimum_test_rows": int(MIN_GPU_PROBE_TEST_ROWS),
-            "desired_test_rows": int(DESIRED_GPU_PROBE_TEST_ROWS),
+            "legacy_default_test_rows": int(LEGACY_DEFAULT_GPU_PROBE_TEST_ROWS),
             "requested_target_accuracy": float(config.target_accuracy),
             "target_accuracy": float(effective_target_accuracy),
             "minimum_target_accuracy": float(MIN_GPU_PROBE_TARGET_ACCURACY),
@@ -1579,6 +1621,11 @@ def _symbol_feature_frame(
         "day_of_week_cos": day_of_week_cos,
         "month_start_3": month_start_3,
         "month_end_3": month_end_3,
+        "max_return_1d_20": _rolling_max(one_day_return, 20),
+        "max_return_5d_60": _rolling_max(_rolling_sum(one_day_return, 5), 60),
+        "corwin_schultz_spread": _corwin_schultz(high, low, close, window=20),
+        "realized_skew_20": _rolling_skew(one_day_return, 20),
+        "limit_up_double_shot": _limit_up_double_shot(limit_up_flag),
     }
     for lag in range(10):
         features[f"ret_lag_{lag}"] = _lag(one_day_return, lag)
@@ -2696,6 +2743,139 @@ def _attach_intraday_factor_features(
     return merged, reports
 
 
+def _attach_tushare_factor_features(
+    data: pd.DataFrame,
+    *,
+    store: LocalDataStore,
+) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
+    reports: list[dict[str, Any]] = []
+    if data.empty:
+        return _zero_tushare_factor_features(data, status="empty_base")
+    tushare_dir = Path(store.cache_dir) / "prediction" / "tushare"
+    if not tushare_dir.is_dir():
+        return _zero_tushare_factor_features(data, status="no_tushare_dir")
+    try:
+        factor = build_tushare_factors(tushare_dir)
+        if factor.frame.empty:
+            return _zero_tushare_factor_features(data, status="no_tushare_data")
+        merged, reports = merge_factor_frames(data, [factor])
+    except Exception as exc:
+        out, reports = _zero_tushare_factor_features(data, status="failed")
+        reports[0]["error"] = str(exc)
+        return out, reports
+    for report in reports:
+        report["status"] = "available"
+    return merged, reports
+
+
+def _zero_tushare_factor_features(
+    data: pd.DataFrame,
+    *,
+    status: str,
+) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
+    out = data.copy()
+    for column in GPU_PROBE_TUSHARE_FACTOR_FEATURES:
+        out[column] = 0.0
+    return out, [
+        {
+            "name": "tushare_factors",
+            "source": "tushare_parquet",
+            "asof_time": "after_close",
+            "lag_rule": "T day Tushare data; use for T+1 prediction only",
+            "coverage_rate": 0.0,
+            "status": status,
+            "columns": list(GPU_PROBE_TUSHARE_FACTOR_FEATURES),
+        }
+    ]
+
+
+def _attach_tgb_factor_features(
+    data: pd.DataFrame,
+    *,
+    daily_context_frames: list[pd.DataFrame],
+) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
+    reports: list[dict[str, Any]] = []
+    if data.empty or not daily_context_frames:
+        return _zero_tgb_factor_features(data, status="empty_base")
+    daily_context = pd.concat(daily_context_frames, ignore_index=True)
+    try:
+        stock_factor = build_tgb_stock_factors(daily_context)
+        market_factor = build_tgb_market_regime_factors(daily_context)
+        merged, reports = merge_factor_frames(data, [stock_factor, market_factor])
+    except Exception as exc:
+        out, reports = _zero_tgb_factor_features(data, status="failed")
+        reports[0]["error"] = str(exc)
+        return out, reports
+    return merged, reports
+
+
+def _zero_tgb_factor_features(
+    data: pd.DataFrame,
+    *,
+    status: str,
+) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
+    out = data.copy()
+    for column in GPU_PROBE_TGB_FACTOR_FEATURES:
+        out[column] = 0.0
+    return out, [
+        {
+            "name": "tgb_daily_factors",
+            "source": "daily_ohlcv_tgb_derived",
+            "asof_time": "after_close",
+            "lag_rule": "T day close-derived TGB factors; use for T+1 prediction only",
+            "coverage_rate": 0.0,
+            "status": status,
+            "columns": list(GPU_PROBE_TGB_FACTOR_FEATURES),
+        }
+    ]
+
+
+def _attach_ths_sector_features(
+    data: pd.DataFrame,
+    *,
+    store: LocalDataStore,
+) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
+    reports: list[dict[str, Any]] = []
+    if data.empty:
+        return _zero_ths_sector_features(data, status="empty_base")
+    tushare_dir = Path(store.cache_dir) / "prediction" / "tushare"
+    if not tushare_dir.is_dir():
+        return _zero_ths_sector_features(data, status="no_tushare_dir")
+    try:
+        factor = build_ths_sector_factors(tushare_dir)
+        if factor.frame.empty:
+            return _zero_ths_sector_features(data, status="no_ths_sector_data")
+        merged, reports = merge_factor_frames(data, [factor])
+    except Exception as exc:
+        out, reports = _zero_ths_sector_features(data, status="failed")
+        reports[0]["error"] = str(exc)
+        return out, reports
+    for report in reports:
+        report["status"] = "available"
+    return merged, reports
+
+
+def _zero_ths_sector_features(
+    data: pd.DataFrame,
+    *,
+    status: str,
+) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
+    out = data.copy()
+    for column in GPU_PROBE_THS_SECTOR_FEATURES:
+        out[column] = 0.0
+    return out, [
+        {
+            "name": "ths_sector_daily",
+            "source": "tushare_ths_cached",
+            "asof_time": "after_close",
+            "lag_rule": "T day THS concept data; use for T+1 prediction only",
+            "coverage_rate": 0.0,
+            "status": status,
+            "columns": list(GPU_PROBE_THS_SECTOR_FEATURES),
+        }
+    ]
+
+
 def _load_intraday_factor_bars(
     store: LocalDataStore,
     *,
@@ -2865,6 +3045,14 @@ def _feature_names_for_config(config: GpuProbeConfig) -> tuple[str, ...]:
     raise ValueError("feature_set must be one of: legacy, base, expanded, research")
 
 
+def _uses_research_external_factors(config: GpuProbeConfig) -> bool:
+    return str(config.feature_set or "expanded").strip().lower() == "research"
+
+
+def _uses_expanded_cached_factors(config: GpuProbeConfig) -> bool:
+    return str(config.feature_set or "expanded").strip().lower() in {"expanded", "research"}
+
+
 def _validate_config(config: GpuProbeConfig) -> list[str]:
     errors: list[str] = []
     if config.start > config.train_end:
@@ -2974,7 +3162,7 @@ def _acceptance_summary(
         future_label_filter_used=future_label_filter_used,
         thresholds=AcceptanceThresholds(
             target_accuracy=float(target_accuracy),
-            desired_lockbox_rows=DESIRED_GPU_PROBE_TEST_ROWS,
+            legacy_default_test_rows=LEGACY_DEFAULT_GPU_PROBE_TEST_ROWS,
             high_confidence_min_rows=MIN_GPU_PROBE_HIGH_CONFIDENCE_ROWS,
             high_confidence_min_coverage=MIN_GPU_PROBE_HIGH_CONFIDENCE_COVERAGE,
             statistical_min_rows=MIN_GPU_PROBE_STATISTICAL_ROWS,
@@ -3402,12 +3590,32 @@ def _feature_cache_descriptor(
     if not enabled or report_dir is None:
         return descriptor
     context_symbols = list(context_symbols or symbols)
-    limit_pool_snapshot_state = _limit_pool_snapshot_cache_state(cache_dir)
-    intraday_cache_state = _intraday_factor_cache_state(raw_dir, frequency=config.intraday_factor_frequency)
+    research_external_enabled = _uses_research_external_factors(config)
+    expanded_cached_enabled = _uses_expanded_cached_factors(config)
+    limit_pool_snapshot_state = (
+        _limit_pool_snapshot_cache_state(cache_dir)
+        if research_external_enabled
+        else {"status": "skipped", "reason": "feature_set_not_research"}
+    )
+    intraday_cache_state = (
+        _intraday_factor_cache_state(raw_dir, frequency=config.intraday_factor_frequency)
+        if research_external_enabled
+        else {"status": "skipped", "reason": "feature_set_not_research", "frequency": str(config.intraday_factor_frequency)}
+    )
+    tushare_cache_state = (
+        _tushare_factor_cache_state(cache_dir)
+        if research_external_enabled
+        else {"status": "skipped", "reason": "feature_set_not_research"}
+    )
+    ths_sector_cache_state = (
+        _ths_sector_cache_state(cache_dir)
+        if expanded_cached_enabled
+        else {"status": "skipped", "reason": "feature_set_not_expanded_or_research"}
+    )
     fingerprint_payload = {
-        "version": 20,
+        "version": 22,
         "source_code_hash": _source_hash(),
-        "feature_names": list(GPU_PROBE_ALL_FEATURES),
+        "feature_names": list(_feature_names_for_config(config)),
         "start": str(config.start),
         "end": str(config.end),
         "main_board_only": bool(config.main_board_only),
@@ -3430,6 +3638,8 @@ def _feature_cache_descriptor(
         "limit_pool_snapshot_state": limit_pool_snapshot_state,
         "intraday_factor_frequency": str(config.intraday_factor_frequency),
         "intraday_cache_state": intraday_cache_state,
+        "tushare_cache_state": tushare_cache_state,
+        "ths_sector_cache_state": ths_sector_cache_state,
     }
     fingerprint = _hash_payload(fingerprint_payload)[:16]
     directory = Path(report_dir) / "prediction" / "feature_cache"
@@ -3444,6 +3654,8 @@ def _feature_cache_descriptor(
             "context_symbols_count": len(context_symbols),
             "limit_pool_snapshot_state": limit_pool_snapshot_state,
             "intraday_cache_state": intraday_cache_state,
+            "tushare_cache_state": tushare_cache_state,
+            "ths_sector_cache_state": ths_sector_cache_state,
             "hit": bool(path.exists() and not config.refresh_feature_cache),
         }
     )
@@ -3522,6 +3734,97 @@ def _intraday_factor_cache_state(raw_dir: Any, *, frequency: str) -> dict[str, A
         "latest_mtime_ns": latest_mtime_ns,
         "total_size": total_size,
         "sample_hash": _hash_payload(sample),
+    }
+
+
+def _tushare_factor_cache_state(cache_dir: Any) -> dict[str, Any]:
+    if cache_dir is None:
+        return {"status": "missing_cache_dir"}
+    root = Path(cache_dir) / "prediction" / "tushare"
+    if not root.exists():
+        return {"status": "no_tushare_dir", "root": str(root)}
+    api_dirs = sorted(path for path in root.iterdir() if path.is_dir())
+    if not api_dirs:
+        return {"status": "empty_tushare_dir", "root": str(root)}
+    rows: list[dict[str, Any]] = []
+    for api_dir in api_dirs:
+        try:
+            parquet_files = list(api_dir.glob("*.parquet"))
+            log_files = list(api_dir.glob("_pull_log*.json"))
+        except OSError:
+            continue
+        latest_mtime_ns = 0
+        total_size = 0
+        for path in [*parquet_files, *log_files]:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            latest_mtime_ns = max(latest_mtime_ns, int(stat.st_mtime_ns))
+            total_size += int(stat.st_size)
+        rows.append(
+            {
+                "api": api_dir.name,
+                "parquet_count": len(parquet_files),
+                "log_count": len(log_files),
+                "latest_mtime_ns": latest_mtime_ns,
+                "total_size": total_size,
+            }
+        )
+    if not rows:
+        return {"status": "unreadable_tushare_dir", "root": str(root)}
+    return {
+        "status": "available",
+        "root": str(root),
+        "api_count": len(rows),
+        "state_hash": _hash_payload(rows),
+    }
+
+
+def _ths_sector_cache_state(cache_dir: Any) -> dict[str, Any]:
+    if cache_dir is None:
+        return {"status": "missing_cache_dir"}
+    root = Path(cache_dir) / "prediction" / "tushare"
+    if not root.exists():
+        return {"status": "no_tushare_dir", "root": str(root)}
+    rows: list[dict[str, Any]] = []
+    for api_name in ("ths_member", "ths_daily", "limit_list_d"):
+        api_dir = root / api_name
+        if not api_dir.exists():
+            rows.append({"api": api_name, "status": "missing"})
+            continue
+        try:
+            parquet_files = list(api_dir.glob("*.parquet"))
+            log_files = list(api_dir.glob("_pull_log*.json"))
+        except OSError:
+            rows.append({"api": api_name, "status": "unreadable"})
+            continue
+        latest_mtime_ns = 0
+        total_size = 0
+        for path in [*parquet_files, *log_files]:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            latest_mtime_ns = max(latest_mtime_ns, int(stat.st_mtime_ns))
+            total_size += int(stat.st_size)
+        rows.append(
+            {
+                "api": api_name,
+                "status": "available" if parquet_files else "empty",
+                "parquet_count": len(parquet_files),
+                "log_count": len(log_files),
+                "latest_mtime_ns": latest_mtime_ns,
+                "total_size": total_size,
+            }
+        )
+    if not any((row.get("parquet_count") or 0) > 0 for row in rows):
+        return {"status": "no_ths_sector_cache", "root": str(root), "apis": rows}
+    return {
+        "status": "available",
+        "root": str(root),
+        "apis": rows,
+        "state_hash": _hash_payload(rows),
     }
 
 
@@ -5455,6 +5758,60 @@ def _consecutive_streak(flags):
 def _profit_pressure(close, *, window: int):
     unfolded = _rolling_unfold(close, window)
     return (close.view(-1, 1) > unfolded).to(close.dtype).mean(dim=1)
+
+
+def _rolling_skew(values, window: int):
+    import torch
+
+    unfolded = _rolling_unfold(values, window)
+    mean = unfolded.mean(dim=1, keepdim=True)
+    diff = unfolded - mean
+    n = float(window)
+    m2 = (diff ** 2).mean(dim=1)
+    m3 = (diff ** 3).mean(dim=1)
+    std = torch.clamp(m2.sqrt(), min=1e-8)
+    return m3 / (std ** 3)
+
+
+def _corwin_schultz(high, low, close, *, window: int = 20):
+    import torch
+
+    log_high = torch.log(torch.clamp(high, min=1e-6))
+    log_low = torch.log(torch.clamp(low, min=1e-6))
+    beta = (log_high - log_low) ** 2
+    beta_sum = _rolling_mean(beta, 2)
+    gamma_hl = (
+        torch.log(torch.clamp(_rolling_max(high, 2), min=1e-6))
+        - torch.log(torch.clamp(_rolling_min(low, 2), min=1e-6))
+    ) ** 2
+    alpha_raw = (torch.sqrt(2.0 * beta_sum) - torch.sqrt(beta_sum)) / (
+        3.0 - 2.0 * 1.4142135
+    ) - torch.sqrt(gamma_hl / (3.0 - 2.0 * 1.4142135))
+    alpha = torch.clamp(alpha_raw, min=0.0)
+    spread = 2.0 * (torch.exp(alpha) - 1.0) / (1.0 + torch.exp(alpha))
+    return _rolling_mean(spread, window)
+
+
+def _limit_up_double_shot(limit_up_flag):
+    import torch
+
+    n = len(limit_up_flag)
+    result = torch.zeros(n, device=limit_up_flag.device)
+    for i in range(2, min(n, n)):
+        if limit_up_flag[i] < 0.5:
+            continue
+        for gap in range(1, 8):
+            j = i - gap - 1
+            if j < 0:
+                break
+            if limit_up_flag[j] >= 0.5:
+                mid_slice = limit_up_flag[j + 1 : i]
+                if mid_slice.sum() < 0.5:
+                    result[i] = 1.0
+                    break
+            if limit_up_flag[j + 1] >= 0.5 and j + 1 < i:
+                break
+    return result
 
 
 def _rolling_unfold(values, window: int):

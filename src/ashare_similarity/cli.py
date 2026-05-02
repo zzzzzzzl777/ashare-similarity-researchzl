@@ -118,7 +118,7 @@ def _build_parser() -> argparse.ArgumentParser:
     gpu_probe.add_argument("--test-start", required=True)
     gpu_probe.add_argument("--end", required=True)
     gpu_probe.add_argument("--train-rows", type=int, default=300_000)
-    gpu_probe.add_argument("--test-rows", type=int, default=50_000)
+    gpu_probe.add_argument("--test-rows", type=int, default=120_000)
     gpu_probe.add_argument("--seed", type=int, default=42)
     gpu_probe.add_argument("--max-symbols", type=int)
     gpu_probe.add_argument("--epochs", type=int, default=160)

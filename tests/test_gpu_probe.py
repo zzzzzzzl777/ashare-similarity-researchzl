@@ -150,7 +150,121 @@ def test_feature_set_keeps_noisy_research_factors_out_of_default_expanded():
     assert "money_effect_chase_alignment" in research
     assert "collapse_warning_signal" in research
     assert "index_panic_rebound_setup" in research
+    assert "tushare_net_mf_amount" not in expanded
+    assert "tushare_net_mf_amount" in research
+    assert gpu_probe._uses_research_external_factors(
+        GpuProbeConfig(
+            start=date(2024, 1, 1),
+            train_end=date(2024, 3, 1),
+            test_start=date(2024, 3, 4),
+            end=date(2024, 5, 31),
+            feature_set="expanded",
+        )
+    ) is False
+    assert gpu_probe._uses_research_external_factors(
+        GpuProbeConfig(
+            start=date(2024, 1, 1),
+            train_end=date(2024, 3, 1),
+            test_start=date(2024, 3, 4),
+            end=date(2024, 5, 31),
+            feature_set="research",
+        )
+    ) is True
     assert len(research) > len(expanded)
+
+
+def test_expanded_feature_set_attaches_cached_factor_frames(monkeypatch, make_ohlcv_frame, tmp_path):
+    called: list[str] = []
+
+    def _attach_tgb(data, *, daily_context_frames):
+        assert daily_context_frames
+        called.append("tgb")
+        out = data.copy()
+        out["tgb_ma_alignment_score"] = 1.0
+        return out, [{"name": "tgb_stock_daily", "status": "available"}]
+
+    def _attach_ths(data, *, store):
+        assert store.cache_dir == str(tmp_path)
+        called.append("ths")
+        out = data.copy()
+        out["sector_pct_change_best"] = 1.0
+        return out, [{"name": "ths_sector_daily", "status": "available"}]
+
+    def _attach_tushare(*args, **kwargs):
+        pytest.fail("research-only Tushare factors should not be attached for expanded")
+
+    def _train_and_score(train, test, **kwargs):
+        assert len(train) > 0
+        assert len(test) > 0
+        return {
+            "model": "stub",
+            "model_kind": "stub",
+            "accuracy": 1.0,
+            "correct_count": int(len(test)),
+            "brier": 0.0,
+            "positive_rate": 0.5,
+            "baseline_accuracy": 0.5,
+            "baseline_brier": 0.25,
+            "validation_accuracy": 1.0,
+            "validation_brier": 0.0,
+            "classification_threshold": 0.5,
+            "validation_confident_accuracy": 1.0,
+            "validation_confident_coverage": 1.0,
+            "confidence_low_threshold": 0.35,
+            "confidence_high_threshold": 0.65,
+            "confident_accuracy": 1.0,
+            "confident_brier": 0.0,
+            "confident_count": int(len(test)),
+            "confident_correct_count": int(len(test)),
+            "confident_coverage": 1.0,
+            "validation_confident_target_met": True,
+            "confident_target_met": True,
+            "test_oracle_coverage_at_target_accuracy": 1.0,
+            "test_oracle_count_at_target_accuracy": int(len(test)),
+            "test_oracle_target_accuracy": 0.75,
+            "test_oracle_note": "stub",
+            "candidate_warnings": [],
+            "train_window_rows": int(len(train)),
+            "fit_rows": int(len(train)),
+            "validation_rows": 1,
+        }
+
+    def _load_bars(symbol, frequency):
+        del symbol, frequency
+        frame = make_ohlcv_frame(periods=95, base_price=10.0, volume_base=8_000_000.0)
+        frame["amount"] = frame["volume"] * frame["close"]
+        frame["turnover"] = np.linspace(3.0, 10.0, len(frame))
+        return frame
+
+    monkeypatch.setattr(gpu_probe, "_attach_tgb_factor_features", _attach_tgb)
+    monkeypatch.setattr(gpu_probe, "_attach_ths_sector_features", _attach_ths)
+    monkeypatch.setattr(gpu_probe, "_attach_tushare_factor_features", _attach_tushare)
+    monkeypatch.setattr(gpu_probe, "_train_and_score", _train_and_score)
+
+    result = gpu_probe.run_gpu_next_day_probe(
+        SimpleNamespace(
+            list_cached_symbols=lambda frequency: ["600001"],
+            load_bars=_load_bars,
+            cache_dir=str(tmp_path),
+        ),
+        GpuProbeConfig(
+            start=date(2024, 1, 1),
+            train_end=date(2024, 3, 1),
+            test_start=date(2024, 3, 4),
+            end=date(2024, 5, 31),
+            test_rows=10,
+            short_only=False,
+            feature_set="expanded",
+            use_feature_cache=False,
+        ),
+    )
+
+    assert result["status"] == "completed"
+    assert called == ["tgb", "ths"]
+    assert [report["name"] for report in result["external_factors"][-2:]] == [
+        "tgb_stock_daily",
+        "ths_sector_daily",
+    ]
 
 
 def test_tail_accuracy_feature_scores_prioritize_rare_high_precision_signal():
@@ -666,7 +780,7 @@ def test_final_unseen_lockbox_is_blocked_after_research_observation(app_config):
     assert acceptance["passed_without_lockbox_ledger_gate"] is True
 
 
-def test_run_gpu_probe_threads_target_accuracy_into_training(monkeypatch, make_ohlcv_frame):
+def test_run_gpu_probe_threads_target_accuracy_into_training(monkeypatch, make_ohlcv_frame, tmp_path):
     seen: dict[str, object] = {}
     symbols = ["600001", "600002"]
 
@@ -715,7 +829,7 @@ def test_run_gpu_probe_threads_target_accuracy_into_training(monkeypatch, make_o
         return frame
 
     monkeypatch.setattr(gpu_probe, "_train_and_score", _train_and_score)
-    store = SimpleNamespace(list_cached_symbols=lambda frequency: symbols, load_bars=_load_bars)
+    store = SimpleNamespace(list_cached_symbols=lambda frequency: symbols, load_bars=_load_bars, cache_dir=str(tmp_path))
 
     result = gpu_probe.run_gpu_next_day_probe(
         store,
@@ -751,7 +865,7 @@ def test_run_gpu_probe_threads_target_accuracy_into_training(monkeypatch, make_o
     assert seen["test_date_min"] >= date(2024, 3, 4)
 
 
-def test_gpu_probe_prefers_batch_market_data_loader(monkeypatch, make_ohlcv_frame):
+def test_gpu_probe_prefers_batch_market_data_loader(monkeypatch, make_ohlcv_frame, tmp_path):
     pytest.importorskip("polars")
     import polars as pl
 
@@ -812,6 +926,7 @@ def test_gpu_probe_prefers_batch_market_data_loader(monkeypatch, make_ohlcv_fram
         list_cached_symbols=lambda frequency: symbols,
         load_market_data=_load_market_data,
         load_bars=_load_bars,
+        cache_dir=str(tmp_path),
     )
 
     result = gpu_probe.run_gpu_next_day_probe(
@@ -826,7 +941,7 @@ def test_gpu_probe_prefers_batch_market_data_loader(monkeypatch, make_ohlcv_fram
         ),
     )
 
-    assert calls == ["daily", "5"]
+    assert calls == ["daily"]
     assert result["data_loader"]["mode"] == "polars_batch_load_market_data"
 
 
@@ -888,6 +1003,7 @@ def test_gpu_probe_reuses_feature_cache(monkeypatch, app_config, make_ohlcv_fram
     monkeypatch.setattr(gpu_probe, "_train_and_score", _train_and_score)
     store = SimpleNamespace(
         config=app_config,
+        cache_dir=app_config.storage.cache_dir,
         list_cached_symbols=lambda frequency: symbols,
         load_market_data=_load_market_data,
         load_bars=lambda symbol, frequency: pytest.fail("load_bars should not be used"),
@@ -905,7 +1021,7 @@ def test_gpu_probe_reuses_feature_cache(monkeypatch, app_config, make_ohlcv_fram
     second = gpu_probe.run_gpu_next_day_probe(store, config)
 
     assert train_calls == 2
-    assert load_calls == 2
+    assert load_calls == 1
     assert first["feature_cache"]["written"] is True
     assert second["feature_cache"]["hit"] is True
 
@@ -918,6 +1034,7 @@ def test_feature_cache_fingerprint_changes_when_limit_pool_snapshots_change(app_
         test_start=date(2024, 3, 4),
         end=date(2024, 5, 31),
         short_only=False,
+        feature_set="research",
     )
     symbols = ["600001", "600002"]
 
@@ -943,6 +1060,7 @@ def test_feature_cache_fingerprint_changes_when_intraday_cache_changes(app_confi
         test_start=date(2024, 3, 4),
         end=date(2024, 5, 31),
         short_only=False,
+        feature_set="research",
         intraday_factor_frequency="5",
     )
     symbols = ["600001", "600002"]
@@ -956,6 +1074,29 @@ def test_feature_cache_fingerprint_changes_when_intraday_cache_changes(app_confi
 
     assert before["fingerprint"] != after["fingerprint"]
     assert after["intraday_cache_state"]["status"] == "available"
+
+
+def test_expanded_feature_cache_fingerprint_changes_when_ths_sector_cache_changes(app_config):
+    store = SimpleNamespace(config=app_config)
+    config = GpuProbeConfig(
+        start=date(2024, 1, 1),
+        train_end=date(2024, 3, 1),
+        test_start=date(2024, 3, 4),
+        end=date(2024, 5, 31),
+        short_only=False,
+        feature_set="expanded",
+    )
+    symbols = ["600001", "600002"]
+
+    before = gpu_probe._feature_cache_descriptor(store, config, symbols=symbols)
+    ths_dir = app_config.storage.cache_dir / "prediction" / "tushare" / "ths_member"
+    ths_dir.mkdir(parents=True, exist_ok=True)
+    (ths_dir / "all_members.parquet").write_bytes(b"ths-sector-cache-marker")
+
+    after = gpu_probe._feature_cache_descriptor(store, config, symbols=symbols)
+
+    assert before["fingerprint"] != after["fingerprint"]
+    assert after["ths_sector_cache_state"]["status"] == "available"
 
 
 def test_attach_intraday_factor_features_merges_cached_minute_bars():
@@ -1005,7 +1146,7 @@ def test_attach_intraday_factor_features_merges_cached_minute_bars():
     assert merged.loc[0, "minute_last_30min_return"] > 0.0
 
 
-def test_gpu_probe_floors_target_accuracy_at_75(monkeypatch, make_ohlcv_frame):
+def test_gpu_probe_floors_target_accuracy_at_75(monkeypatch, make_ohlcv_frame, tmp_path):
     seen: dict[str, object] = {}
 
     def _train_and_score(train, test, **kwargs):
@@ -1046,7 +1187,7 @@ def test_gpu_probe_floors_target_accuracy_at_75(monkeypatch, make_ohlcv_frame):
         return frame
 
     monkeypatch.setattr(gpu_probe, "_train_and_score", _train_and_score)
-    store = SimpleNamespace(list_cached_symbols=lambda frequency: ["600001"], load_bars=_load_bars)
+    store = SimpleNamespace(list_cached_symbols=lambda frequency: ["600001"], load_bars=_load_bars, cache_dir=str(tmp_path))
 
     result = gpu_probe.run_gpu_next_day_probe(
         store,
@@ -1444,3 +1585,190 @@ def test_acceptance_coverage_gate_requires_both_count_and_coverage():
     assert fail_low_coverage["passed"] is False
     assert fail_low_count["high_confidence"]["coverage_gate_met"] is False
     assert fail_low_count["passed"] is False
+
+
+def test_seen_research_cannot_final_pass():
+    result = {
+        "accuracy": 0.82,
+        "correct_count": 98_400,
+        "brier": 0.20,
+        "baseline_brier": 0.24,
+        "confident_accuracy": 0.85,
+        "confident_correct_count": 10_200,
+        "confident_brier": 0.17,
+        "confident_count": 12_000,
+        "confident_coverage": 0.10,
+    }
+    accepted = gpu_probe._acceptance_summary(
+        result,
+        test_rows=120_000,
+        required_test_rows=120_000,
+        target_accuracy=0.75,
+        lockbox_role="seen_research",
+    )
+    assert accepted["passed"] is False
+    assert accepted["status"] == "research_only"
+    assert accepted["passed_without_lockbox_role_gate"] is True
+    assert accepted["lockbox_role"] == "seen_research"
+    assert accepted["lockbox_role_gate_met"] is False
+    assert accepted["final_acceptance_eligible"] is False
+
+
+def test_final_unseen_reused_lockbox_rejected_by_ledger(app_config):
+    split_manifest = {
+        "lockbox_identity_hash": "reuse-check-identity",
+        "split_hash": "research-split-hash",
+        "train_end": "2024-03-01",
+        "test_start": "2024-04-01",
+        "end": "2024-04-30",
+        "test_event_start": "2024-04-01",
+        "test_event_end": "2024-04-30",
+        "test_lockbox_rows": 120_000,
+    }
+    directory = app_config.storage.report_dir / "prediction"
+    artifact = directory / "runs" / "research-run" / "acceptance.json"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("{}", encoding="utf-8")
+    gpu_probe._append_lockbox_ledger_record(
+        directory,
+        {
+            "run_id": "research-run",
+            "status": "completed",
+            "lockbox_role": "seen_research",
+            "acceptance": {"passed": False, "status": "research_only"},
+            "split_manifest": split_manifest,
+            "split_hash": "research-split-hash",
+        },
+        artifact_path=artifact,
+    )
+
+    final_config = GpuProbeConfig(
+        start=date(2024, 1, 1),
+        train_end=date(2024, 3, 1),
+        test_start=date(2024, 4, 1),
+        end=date(2024, 4, 30),
+        lockbox_role="final_unseen",
+    )
+    ledger = gpu_probe._lockbox_ledger_status(
+        SimpleNamespace(config=app_config),
+        split_manifest=split_manifest,
+        config=final_config,
+    )
+    acceptance = gpu_probe._acceptance_summary(
+        {
+            "accuracy": 0.82,
+            "brier": 0.19,
+            "baseline_brier": 0.24,
+            "confident_accuracy": 0.88,
+            "confident_brier": 0.15,
+            "confident_count": 120_000,
+            "confident_correct_count": 105_600,
+            "confident_coverage": 1.0,
+        },
+        test_rows=120_000,
+        required_test_rows=120_000,
+        target_accuracy=0.75,
+        lockbox_role="final_unseen",
+        lockbox_ledger=ledger,
+    )
+
+    assert ledger["gate_met"] is False
+    assert "research-run" in ledger["observed_run_ids"]
+    assert acceptance["passed"] is False
+    assert acceptance["status"] == "lockbox_reused"
+    assert acceptance["passed_without_lockbox_ledger_gate"] is True
+    assert acceptance["final_acceptance_eligible"] is False
+
+
+def test_default_test_rows_consistent_with_hc_gate():
+    import math
+    default_config = GpuProbeConfig(
+        start=date(2024, 1, 1),
+        train_end=date(2024, 3, 1),
+        test_start=date(2024, 4, 1),
+        end=date(2024, 6, 30),
+    )
+    min_implied = math.ceil(
+        gpu_probe.MIN_GPU_PROBE_HIGH_CONFIDENCE_ROWS
+        / gpu_probe.MIN_GPU_PROBE_HIGH_CONFIDENCE_COVERAGE
+    )
+    assert min_implied == 100_000
+    assert default_config.test_rows >= min_implied
+    assert default_config.test_rows == gpu_probe.RECOMMENDED_GPU_PROBE_TEST_ROWS
+    assert default_config.test_rows == 120_000
+
+
+def test_acceptance_output_no_desired_test_rows_field():
+    result = {
+        "accuracy": 0.80,
+        "correct_count": 96_000,
+        "brier": 0.20,
+        "baseline_brier": 0.24,
+        "confident_accuracy": 0.85,
+        "confident_correct_count": 10_200,
+        "confident_brier": 0.18,
+        "confident_count": 12_000,
+        "confident_coverage": 0.10,
+    }
+    accepted = gpu_probe._acceptance_summary(
+        result,
+        test_rows=120_000,
+        required_test_rows=120_000,
+        target_accuracy=0.75,
+    )
+    assert "desired_test_rows" not in accepted
+    assert "legacy_default_test_rows" in accepted
+    assert accepted["legacy_default_test_rows"] == 50_000
+    assert "minimum_test_rows_implied_by_hc_gate" in accepted
+    assert accepted["minimum_test_rows_implied_by_hc_gate"] == 100_000
+
+
+def test_50k_samples_with_10pct_coverage_fails_count_gate():
+    result = {
+        "accuracy": 0.80,
+        "correct_count": 40_000,
+        "brier": 0.20,
+        "baseline_brier": 0.24,
+        "confident_accuracy": 0.85,
+        "confident_correct_count": 4_250,
+        "confident_brier": 0.18,
+        "confident_count": 5_000,
+        "confident_coverage": 0.10,
+    }
+    accepted = gpu_probe._acceptance_summary(
+        result,
+        test_rows=50_000,
+        required_test_rows=50_000,
+        target_accuracy=0.75,
+    )
+    assert accepted["high_confidence"]["coverage_gate_met"] is False
+    assert accepted["high_confidence"]["rows"] == 5_000
+    assert accepted["passed"] is False
+
+
+def test_120k_samples_passes_research_quality_gates():
+    result = {
+        "accuracy": 0.80,
+        "correct_count": 96_000,
+        "brier": 0.20,
+        "baseline_brier": 0.24,
+        "confident_accuracy": 0.85,
+        "confident_correct_count": 10_200,
+        "confident_brier": 0.18,
+        "confident_count": 12_000,
+        "confident_coverage": 0.10,
+    }
+    accepted = gpu_probe._acceptance_summary(
+        result,
+        test_rows=120_000,
+        required_test_rows=120_000,
+        target_accuracy=0.75,
+        lockbox_role="seen_research",
+    )
+    assert accepted["high_confidence"]["coverage_gate_met"] is True
+    assert accepted["high_confidence"]["statistical_rows_met"] is True
+    assert accepted["high_confidence"]["wilson_lower_met"] is True
+    assert accepted["high_confidence"]["brier_beats_baseline"] is True
+    assert accepted["passed_without_lockbox_role_gate"] is True
+    assert accepted["passed"] is False
+    assert accepted["status"] == "research_only"

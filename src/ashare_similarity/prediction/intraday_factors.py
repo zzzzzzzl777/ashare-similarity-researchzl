@@ -174,13 +174,25 @@ def build_intraday_daily_factors(minute_bars: pd.DataFrame) -> pd.DataFrame:
 
 
 def _last_minutes(group: pd.DataFrame, *, minutes: int) -> pd.DataFrame:
-    cutoff = group["timestamp"].iloc[-1] - pd.Timedelta(minutes=minutes)
-    return group[group["timestamp"] >= cutoff]
+    if len(group) <= 1:
+        return group
+    diffs = group["timestamp"].diff().dropna()
+    bar_interval_min = diffs.median().total_seconds() / 60.0
+    if bar_interval_min <= 0:
+        return group
+    n_bars = max(1, round(minutes / bar_interval_min))
+    return group.iloc[-min(n_bars, len(group)):]
 
 
 def _first_minutes(group: pd.DataFrame, *, minutes: int) -> pd.DataFrame:
-    cutoff = group["timestamp"].iloc[0] + pd.Timedelta(minutes=minutes)
-    return group[group["timestamp"] <= cutoff]
+    if len(group) <= 1:
+        return group
+    diffs = group["timestamp"].diff().dropna()
+    bar_interval_min = diffs.median().total_seconds() / 60.0
+    if bar_interval_min <= 0:
+        return group
+    n_bars = max(1, round(minutes / bar_interval_min))
+    return group.iloc[:min(n_bars, len(group))]
 
 
 def _clock_window(group: pd.DataFrame, *, start: str, end: str) -> pd.DataFrame:
