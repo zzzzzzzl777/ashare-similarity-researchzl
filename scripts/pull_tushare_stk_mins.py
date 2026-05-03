@@ -226,6 +226,7 @@ def pull_by_segment():
               f"{len(eligible)} eligible, {len(done)} done, {len(remaining)} remaining")
 
         round_num = 0
+        current_wait = COOLDOWN_WAIT
         while remaining and round_num < MAX_ROUNDS:
             round_num += 1
             print(f"\n--- Seg {seg_idx} Round {round_num}, "
@@ -293,11 +294,15 @@ def pull_by_segment():
                     time.sleep(BATCH_REST)
 
             if still_need:
+                if len(still_need) >= len(remaining):
+                    current_wait = min(current_wait * 2, 3600)
+                else:
+                    current_wait = COOLDOWN_WAIT
                 print(f"  Round {round_num} done. "
                       f"Still need: {len(still_need)}. "
-                      f"Waiting {COOLDOWN_WAIT}s before next round...")
+                      f"Waiting {current_wait}s before next round...")
                 save_progress(progress)
-                time.sleep(COOLDOWN_WAIT)
+                time.sleep(current_wait)
             else:
                 print(f"  Round {round_num} done. "
                       f"Segment {seg_idx} COMPLETE!")
@@ -455,6 +460,7 @@ def repair_segments():
         print(f"\nRepairing Seg {seg_idx}: {len(still_need)} stocks")
 
         round_num = 0
+        current_wait = COOLDOWN_WAIT
         while still_need and round_num < MAX_ROUNDS:
             round_num += 1
             new_remaining = []
@@ -491,7 +497,12 @@ def repair_segments():
                     consecutive_empties = 0
 
             if new_remaining:
-                time.sleep(COOLDOWN_WAIT)
+                if len(new_remaining) >= len(still_need):
+                    current_wait = min(current_wait * 2, 3600)
+                else:
+                    current_wait = COOLDOWN_WAIT
+                print(f"  Round done. Still need: {len(new_remaining)}. Waiting {current_wait}s...")
+                time.sleep(current_wait)
             still_need = new_remaining
 
         save_progress(progress)

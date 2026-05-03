@@ -12,6 +12,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+_PREDICTION_CAPTURE: dict[str, Any] | None = None
+
 from ashare_similarity.data.storage import LocalDataStore
 from ashare_similarity.prediction.acceptance import AcceptanceThresholds, build_prediction_acceptance
 from ashare_similarity.prediction.factor_cache_manager import merge_factor_frames
@@ -19,6 +21,7 @@ from ashare_similarity.prediction.free_data_factors import (
     BOARD_STRUCTURE_COLUMNS,
     MARKET_EMOTION_COLUMNS,
     TUSHARE_FACTOR_COLUMNS,
+    _limit_threshold_for_symbol,
     build_board_structure_factor,
     build_cross_market_return_factor,
     build_market_emotion_factor,
@@ -782,6 +785,7 @@ class GpuProbeConfig:
     refresh_feature_cache: bool = False
     lockbox_role: str = "seen_research"
     selector_coverage_weight: float = 0.02
+    exclude_event_limit_up: bool = True
     exclude_feature_prefix: tuple[str, ...] = ()
 
 
@@ -915,6 +919,9 @@ def run_gpu_next_day_probe(store: LocalDataStore, config: GpuProbeConfig) -> dic
     data = _ensure_feature_columns(data.sort_values("date"))
     data["label_date"] = pd.to_datetime(data["label_date"], errors="coerce")
     data = data.dropna(subset=["date", "label_date"])
+
+    data, event_limit_up_filter_report = _apply_event_limit_up_filter(data, config)
+
     train = data[data["label_date"].dt.date <= config.train_end]
     test = data[(data["date"].dt.date >= config.test_start) & (data["label_date"].dt.date <= config.end)]
     if train.empty or test.empty:
@@ -931,6 +938,7 @@ def run_gpu_next_day_probe(store: LocalDataStore, config: GpuProbeConfig) -> dic
             "feature_cache": feature_cache,
             "external_factors": free_factor_reports,
             "active_rank_filter": active_rank_filter_report,
+            "event_limit_up_filter": event_limit_up_filter_report,
         }
 
     if len(test) > effective_test_rows:
@@ -1044,10 +1052,13 @@ def run_gpu_next_day_probe(store: LocalDataStore, config: GpuProbeConfig) -> dic
                 "active_rank_rule": "when min_active_anomaly_rank > 0, keep only rows whose same-day active anomaly rank is at or above the threshold.",
             },
             "active_rank_filter": active_rank_filter_report,
+            "event_limit_up_filter": event_limit_up_filter_report,
+            "exclude_event_limit_up": bool(config.exclude_event_limit_up),
             "methodology_audit": _methodology_audit_summary(
                 config,
                 feature_cache=feature_cache,
                 active_rank_filter=active_rank_filter_report,
+                event_limit_up_filter=event_limit_up_filter_report,
                 external_factors=free_factor_reports,
             ),
             "training_protocol": {
@@ -1093,6 +1104,9 @@ def _symbol_feature_frame(
 ) -> pd.DataFrame:
     if bars.empty or "date" not in bars.columns:
         return pd.DataFrame()
+
+    limit_threshold = _limit_threshold_for_symbol(symbol)
+    limit_detect = limit_threshold - 0.5
 
     frame = bars.copy()
     frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
@@ -1167,13 +1181,13 @@ def _symbol_feature_frame(
         + torch.clamp(volume_z_20, min=0.0) * 0.1
         + torch.clamp(amount_z_20, min=0.0) * 0.1
     )
-    near_limit_close = ((one_day_return >= 8.0) & (close_position >= 0.75)).to(torch.float32)
-    limit_up_flag = (one_day_return >= 9.5).to(torch.float32)
-    limit_down_flag = (one_day_return <= -9.5).to(torch.float32)
+    near_limit_close = ((one_day_return >= (limit_threshold - 2.0)) & (close_position >= 0.75)).to(torch.float32)
+    limit_up_flag = (one_day_return >= limit_detect).to(torch.float32)
+    limit_down_flag = (one_day_return <= -limit_detect).to(torch.float32)
     limit_up_streak = _consecutive_streak(limit_up_flag)
     low_return = (low / torch.clamp(prev_close, min=eps) - 1.0) * 100.0
     limit_down_bounce_pct = torch.where(
-        low_return <= -9.5,
+        low_return <= -limit_detect,
         (close / torch.clamp(low, min=eps) - 1.0) * 100.0,
         torch.zeros_like(one_day_return),
     )
@@ -1199,8 +1213,8 @@ def _symbol_feature_frame(
         + failed_breakout_20
     )
     high_return = (high / torch.clamp(prev_close, min=eps) - 1.0) * 100.0
-    limit_touch_fail_proxy = ((high_return >= 9.7) & (one_day_return < 9.0)).to(torch.float32)
-    failed_limit_up = ((high_return >= 9.7) & (one_day_return < 9.5)).to(torch.float32)
+    limit_touch_fail_proxy = ((high_return >= (limit_detect + 0.2)) & (one_day_return < (limit_detect - 0.5))).to(torch.float32)
+    failed_limit_up = ((high_return >= (limit_detect + 0.2)) & (one_day_return < limit_detect)).to(torch.float32)
     limit_seal_quality_proxy = (
         limit_up_flag
         * close_position
@@ -1428,8 +1442,8 @@ def _symbol_feature_frame(
         & (stock_personality_score >= 1.0)
     ).to(torch.float32)
     seal_grade_confirmation_proxy = (
-        ((low_return <= -3.0) & (high_return >= 9.5))
-        | ((_lag(failed_limit_up, 1) > 0.5) & (high_return >= 9.5))
+        ((low_return <= -3.0) & (high_return >= limit_detect))
+        | ((_lag(failed_limit_up, 1) > 0.5) & (high_return >= limit_detect))
         | ((one_day_return >= 7.0) & (upper_shadow_pct >= 0.25) & (volume_to_mean_20 >= 1.50))
     ).to(torch.float32)
     mega_order_absorption_proxy = (
@@ -1446,9 +1460,9 @@ def _symbol_feature_frame(
         / 5.0
     )
     limit_up_turnover = limit_up_flag * turnover
-    one_word_board_proxy = ((gap_pct >= 9.0) & (limit_up_flag > 0.5) & (range_pct <= 1.5)).to(torch.float32)
+    one_word_board_proxy = ((gap_pct >= (limit_detect - 0.5)) & (limit_up_flag > 0.5) & (range_pct <= 1.5)).to(torch.float32)
     t_shape_board_proxy = (
-        (gap_pct >= 8.0)
+        (gap_pct >= (limit_threshold - 2.0))
         & (limit_up_flag > 0.5)
         & (low_return <= 5.0)
         & (close_position >= 0.90)
@@ -2258,7 +2272,27 @@ def _train_and_score(
             confident,
             threshold=threshold,
         )
+    _pred_df = test[["symbol", "date", "label_date"]].copy()
+    _prob_np = prob.detach().cpu().numpy().flatten()
+    _pred_df["probability"] = _prob_np
+    _pred_df["predicted_label"] = (_prob_np >= threshold).astype(np.int8)
+    _pred_df["confident"] = confident.detach().cpu().numpy().flatten().astype(np.int8)
+    _confidence_side_val = str((best.get("confidence_band") or {}).get("side", "both"))
+    _pred_df["confidence_side"] = _confidence_side_val
+    _pred_df["actual"] = y.detach().cpu().numpy().flatten().astype(np.int8)
+    _pred_df["threshold"] = np.float32(threshold)
+    for _col in ("close", "limit_up_like", "next_high_return_pct", "next_close_return_pct",
+                  "pct_change", "turnover", "amount", "name", "stock_name"):
+        if _col in test.columns:
+            _pred_df[_col] = test[_col].values
+    if _PREDICTION_CAPTURE is not None:
+        _PREDICTION_CAPTURE["test_df"] = test
+        _PREDICTION_CAPTURE["prob"] = _prob_np
+        _PREDICTION_CAPTURE["confident"] = confident.detach().cpu().numpy()
+        _PREDICTION_CAPTURE["actual"] = y.detach().cpu().numpy()
+        _PREDICTION_CAPTURE["threshold"] = threshold
     return {
+        "_test_predictions_df": _pred_df,
         "model": best["model_name"],
         "model_kind": model_kind,
         "train_window_rows": int(split_info["train_window_rows"]),
@@ -3032,6 +3066,34 @@ def _apply_active_anomaly_filter(data: pd.DataFrame, config: GpuProbeConfig) -> 
     return filtered, report
 
 
+def _apply_event_limit_up_filter(data: pd.DataFrame, config: GpuProbeConfig) -> tuple[pd.DataFrame, dict[str, Any]]:
+    enabled = bool(config.exclude_event_limit_up)
+    report: dict[str, Any] = {
+        "enabled": enabled,
+        "rule": "drop event-day rows with limit_up_like > 0.5 before train/validation/test split",
+        "rows_before": int(len(data)),
+        "rows_after": int(len(data)),
+        "dropped_rows": 0,
+        "dropped_rate": 0.0,
+    }
+    if data.empty or not enabled:
+        report["status"] = "disabled" if not enabled else "empty"
+        return data, report
+    if "limit_up_like" not in data.columns:
+        report["status"] = "missing_limit_up_like_column"
+        raise ValueError(
+            "exclude_event_limit_up=True requires 'limit_up_like' in the feature cache. "
+            "Cannot silently skip — this would allow non-executable samples into training."
+        )
+    limit_up = pd.to_numeric(data["limit_up_like"], errors="coerce").fillna(0.0) > 0.5
+    filtered = data.loc[~limit_up].copy()
+    report["rows_after"] = int(len(filtered))
+    report["dropped_rows"] = int(limit_up.sum())
+    report["dropped_rate"] = round(float(limit_up.mean()), 6) if len(data) else 0.0
+    report["status"] = "applied"
+    return filtered, report
+
+
 def _feature_names_for_config(config: GpuProbeConfig) -> tuple[str, ...]:
     feature_set = str(config.feature_set or "expanded").strip().lower()
     if feature_set == "legacy":
@@ -3213,9 +3275,11 @@ def _methodology_audit_summary(
     *,
     feature_cache: dict[str, Any],
     active_rank_filter: dict[str, Any],
+    event_limit_up_filter: dict[str, Any] | None = None,
     external_factors: list[dict[str, Any]],
 ) -> dict[str, Any]:
     active_filter_enabled = bool(active_rank_filter.get("enabled"))
+    event_filter_enabled = bool((event_limit_up_filter or {}).get("enabled"))
     low_coverage_factors = [
         str(report.get("name") or "unknown")
         for report in external_factors
@@ -3231,11 +3295,19 @@ def _methodology_audit_summary(
         "calibration": "validation_only",
         "future_label_filter_allowed": False,
         "future_label_filter_used": bool(float(config.min_label_return_pct) > 0.0),
+        "executable_only_protocol": {
+            "exclude_event_limit_up": bool(config.exclude_event_limit_up),
+            "event_limit_up_filter_stage": "post_feature_cache_pre_split" if event_filter_enabled else "disabled",
+            "event_limit_up_filter_rule": "limit_up_like > 0.5",
+            "candidate_pool": "executable_only" if event_filter_enabled else "all_active",
+        },
         "feature_cache_policy": {
             "cache_contains_short_filter_matrix": bool(config.short_only),
             "cache_contains_unfiltered_feature_matrix": not bool(config.short_only),
             "active_rank_filter_in_cache_fingerprint": False,
             "active_rank_filter_stage": "post_feature_cache_pre_split" if active_filter_enabled else "disabled",
+            "event_limit_up_filter_in_cache_fingerprint": False,
+            "event_limit_up_filter_stage": "post_feature_cache_pre_split" if event_filter_enabled else "disabled",
             "feature_cache_fingerprint": feature_cache.get("fingerprint"),
         },
         "sample_gate": {
@@ -3246,6 +3318,7 @@ def _methodology_audit_summary(
             "min_range_pct": float(config.min_range_pct),
             "min_volatility_pct": float(config.min_volatility_pct),
             "min_active_anomaly_rank": float(config.min_active_anomaly_rank),
+            "exclude_event_limit_up": bool(config.exclude_event_limit_up),
         },
         "low_coverage_factor_reports": low_coverage_factors[:20],
     }
@@ -3342,6 +3415,7 @@ def _append_lockbox_ledger_record(directory: Path, result: dict[str, Any], *, ar
 
 
 def _write_gpu_probe_artifacts(store: LocalDataStore, result: dict[str, Any]) -> dict[str, str]:
+    pred_df = result.pop("_test_predictions_df", None)
     config = getattr(store, "config", None)
     storage = getattr(config, "storage", None)
     report_dir = getattr(storage, "report_dir", None)
@@ -3385,6 +3459,13 @@ def _write_gpu_probe_artifacts(store: LocalDataStore, result: dict[str, Any]) ->
     }
     run_dir = directory / "runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
+    if pred_df is not None and isinstance(pred_df, pd.DataFrame) and len(pred_df) > 0:
+        pred_path = run_dir / "test_predictions.parquet"
+        pred_df.to_parquet(pred_path, index=False, engine="pyarrow")
+        _hc_rows = int(pred_df["confident"].sum()) if "confident" in pred_df.columns else 0
+        result["test_predictions_path"] = str(pred_path)
+        result["test_predictions_rows"] = len(pred_df)
+        result["high_confident_rows"] = _hc_rows
     artifact_path = run_dir / "artifact.json"
     _write_json_artifact(artifact_path, payload)
     _write_json_artifact(run_dir / "metrics.json", _metrics_artifact(result))
@@ -3473,6 +3554,8 @@ def _write_gpu_probe_artifacts(store: LocalDataStore, result: dict[str, Any]) ->
         "run_dir": str(run_dir),
         "artifact": str(artifact_path),
     }
+    if result.get("test_predictions_path"):
+        artifacts["test_predictions"] = result["test_predictions_path"]
     ledger_record = _append_lockbox_ledger_record(directory, result, artifact_path=artifact_path)
     artifacts["lockbox_ledger"] = ledger_record["path"]
     result["lockbox_ledger_record"] = ledger_record

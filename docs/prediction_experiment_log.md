@@ -177,3 +177,28 @@ CLI参数：--label-target next_high_from_close --target-high-return-pct 1.0
 | 下一阶段 | forward final_unseen：每日盘后冻结配置预测 → 次日回填标签 → 累计 high_conf_count >= 10,000 AND coverage >= 10% 后一次性验收 |
 | 纪律 | 不自动删除备份、不读取完整 backup JSONL、不自动 commit/push/release、不反向改冻结配置 |
 | lockbox hash 分离 | seen_research hash `54a55ede258240b2` 与 forward hash 分开记录；forward hash 必须在真实 forward run 时由管线生成，不能沿用 2026-01~04 的 hash |
+
+## 2026-05-03 diagnostics
+
+- Mini validation replay scripts were corrected from `OR` to `AND` on `(date == 2026-04-29) & (label_date == 2026-04-30)`.
+- Regenerated mini validation output: `total_executable_samples=630`, `high_conf_total=57`, `high_conf_hits=37`, `high_conf_precision=64.91%`, `natural_hit_rate=69.21%`.
+- Output file: `E:\ashare_similarity_runtime\data\reports\prediction\mini_validation_20260429.json`
+- Baseline replay source remained `gpu_probe_20260503T071809Z_f57a2059`; the fix changed the replay filter, not the frozen forward config.
+
+### 120k seen_research cross_ re-check
+
+- Compared `gpu_probe_20260503T071809Z_f57a2059` vs `gpu_probe_20260503T093827Z_594a3d7d`.
+- `cross_` removal was confirmed at the feature-manifest level: baseline had 18 `cross_*` columns (9 features + 9 availability columns), ablation had 0.
+- This 120k-row diagnostic did **not** improve the key metrics:
+  - high_conf_accuracy: `75.51% -> 75.45%`
+  - wilson_lower_95: `74.86% -> 74.78%`
+  - high_conf_count: `17,051 -> 15,958`
+  - high_conf_coverage: `14.21% -> 13.30%`
+  - high_conf_brier: `0.187206 -> 0.188026`
+- Interpretation: in this newer 120k `seen_research` diagnostic setup, excluding `cross_` is still a valid ablation but no longer helps. This result should **not** be mixed with the frozen forward candidate, because the frozen artifact/runbook uses a different protocol (`required_test_rows=60000`, `min_phase_days_3=1`, `frozen_artifact=gpu_probe_20260501T155956Z_d64e3464`).
+
+### Forward status
+
+- `docs/frozen_forward_config.json` remains the active forward freeze.
+- Local cached market data currently ends at `2026-04-30`, while `frozen_at` is `2026-05-02`.
+- Therefore `final_unseen` forward cannot start yet; the next valid forward run must wait for the first real post-freeze A-share trading date to appear in cache.

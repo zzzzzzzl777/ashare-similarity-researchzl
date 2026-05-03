@@ -204,7 +204,7 @@ def test_status_endpoint_surfaces_backfill_progress_and_cache_summary(status_api
     if not status_paths:
         pytest.fail("No status route is registered, so the backfill/cache contract cannot be exercised.")
 
-    response = client.get(sorted(status_paths)[0])
+    response = client.get("/api/status")
     assert response.status_code == 200, response.text
 
     payload = response.json()

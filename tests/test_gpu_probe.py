@@ -196,7 +196,19 @@ def test_expanded_feature_set_attaches_cached_factor_frames(monkeypatch, make_oh
     def _train_and_score(train, test, **kwargs):
         assert len(train) > 0
         assert len(test) > 0
+        n = len(test)
+        _pred_df = test[["symbol", "date", "label_date"]].copy()
+        _pred_df["probability"] = np.linspace(0.3, 0.9, n)
+        _pred_df["predicted_label"] = np.array([0] * (n // 2) + [1] * (n - n // 2), dtype=np.int8)
+        _pred_df["confident"] = np.array([0] * max(0, n - 3) + [1] * min(3, n), dtype=np.int8)
+        _pred_df["confidence_side"] = "both"
+        _pred_df["actual"] = test["actual"].values.astype(np.int8) if "actual" in test.columns else np.zeros(n, dtype=np.int8)
+        _pred_df["threshold"] = np.float32(0.5)
+        for _c in ("close", "limit_up_like"):
+            if _c in test.columns:
+                _pred_df[_c] = test[_c].values
         return {
+            "_test_predictions_df": _pred_df,
             "model": "stub",
             "model_kind": "stub",
             "accuracy": 1.0,
@@ -1772,3 +1784,252 @@ def test_120k_samples_passes_research_quality_gates():
     assert accepted["passed_without_lockbox_role_gate"] is True
     assert accepted["passed"] is False
     assert accepted["status"] == "research_only"
+
+
+def test_event_limit_up_filter_removes_limit_up_rows():
+    data = pd.DataFrame({
+        "symbol": ["600001", "600002", "600003", "600004"],
+        "date": pd.to_datetime(["2024-01-02"] * 4),
+        "limit_up_like": [1.0, 0.0, 0.4, 0.6],
+        "actual": [1.0, 0.0, 1.0, 1.0],
+    })
+    config = GpuProbeConfig(
+        start=date(2024, 1, 1),
+        train_end=date(2024, 3, 1),
+        test_start=date(2024, 3, 4),
+        end=date(2024, 5, 31),
+        exclude_event_limit_up=True,
+    )
+
+    filtered, report = gpu_probe._apply_event_limit_up_filter(data, config)
+
+    assert report["enabled"] is True
+    assert report["status"] == "applied"
+    assert report["rows_before"] == 4
+    assert report["rows_after"] == 2
+    assert report["dropped_rows"] == 2
+    assert set(filtered["symbol"].tolist()) == {"600002", "600003"}
+
+
+def test_event_limit_up_filter_disabled_keeps_all_rows():
+    data = pd.DataFrame({
+        "symbol": ["600001", "600002"],
+        "date": pd.to_datetime(["2024-01-02"] * 2),
+        "limit_up_like": [1.0, 0.0],
+        "actual": [1.0, 0.0],
+    })
+    config = GpuProbeConfig(
+        start=date(2024, 1, 1),
+        train_end=date(2024, 3, 1),
+        test_start=date(2024, 3, 4),
+        end=date(2024, 5, 31),
+        exclude_event_limit_up=False,
+    )
+
+    filtered, report = gpu_probe._apply_event_limit_up_filter(data, config)
+
+    assert report["enabled"] is False
+    assert report["status"] == "disabled"
+    assert len(filtered) == 2
+
+
+def test_event_limit_up_filter_hard_fails_on_missing_column():
+    data = pd.DataFrame({
+        "symbol": ["600001"],
+        "date": pd.to_datetime(["2024-01-02"]),
+        "actual": [1.0],
+    })
+    config = GpuProbeConfig(
+        start=date(2024, 1, 1),
+        train_end=date(2024, 3, 1),
+        test_start=date(2024, 3, 4),
+        end=date(2024, 5, 31),
+        exclude_event_limit_up=True,
+    )
+
+    with pytest.raises(ValueError, match="limit_up_like"):
+        gpu_probe._apply_event_limit_up_filter(data, config)
+
+
+def test_methodology_audit_includes_event_limit_up_filter():
+    config = GpuProbeConfig(
+        start=date(2024, 1, 1),
+        train_end=date(2024, 3, 1),
+        test_start=date(2024, 3, 4),
+        end=date(2024, 5, 31),
+        exclude_event_limit_up=True,
+    )
+
+    audit = gpu_probe._methodology_audit_summary(
+        config,
+        feature_cache={"fingerprint": "abc123"},
+        active_rank_filter={"enabled": False},
+        event_limit_up_filter={"enabled": True, "rows_before": 1000, "rows_after": 900, "dropped_rows": 100},
+        external_factors=[],
+    )
+
+    assert audit["executable_only_protocol"]["exclude_event_limit_up"] is True
+    assert audit["executable_only_protocol"]["candidate_pool"] == "executable_only"
+    assert audit["feature_cache_policy"]["event_limit_up_filter_stage"] == "post_feature_cache_pre_split"
+    assert audit["sample_gate"]["exclude_event_limit_up"] is True
+
+
+def _make_stub_test_predictions_df(n: int = 20) -> pd.DataFrame:
+    dates = pd.date_range("2024-03-04", periods=n, freq="B")
+    return pd.DataFrame({
+        "symbol": [f"60000{i % 5 + 1}" for i in range(n)],
+        "date": dates,
+        "label_date": dates + pd.offsets.BDay(1),
+        "probability": np.linspace(0.3, 0.9, n),
+        "predicted_label": np.array([0] * (n // 2) + [1] * (n - n // 2), dtype=np.int8),
+        "confident": np.array([0] * (n - 5) + [1] * 5, dtype=np.int8),
+        "confidence_side": "both",
+        "actual": np.array([0] * (n // 2) + [1] * (n - n // 2), dtype=np.int8),
+        "threshold": 0.5,
+        "close": np.linspace(10.0, 15.0, n),
+        "limit_up_like": np.zeros(n),
+    })
+
+
+def test_write_gpu_probe_artifacts_saves_test_predictions_parquet(app_config):
+    store = SimpleNamespace(config=app_config)
+    pred_df = _make_stub_test_predictions_df(20)
+    result = {
+        "_test_predictions_df": pred_df,
+        "model": "stub",
+        "model_kind": "stub",
+        "accuracy": 0.8,
+        "brier": 0.2,
+        "acceptance": {"passed": False, "status": "research_only"},
+        "lockbox_role": "seen_research",
+        "final_acceptance_eligible": False,
+        "feature_set": "expanded",
+        "features": ["close"],
+        "feature_cache": {},
+        "external_factors": [],
+        "data_loader": {},
+        "rows_total": 100,
+        "symbols_considered": 5,
+        "symbol_frames_kept": 5,
+        "split_manifest": {},
+        "selector_coverage_weight": 0.02,
+        "candidate_family": "all",
+    }
+    artifacts = gpu_probe._write_gpu_probe_artifacts(store, result)
+
+    assert "test_predictions" in artifacts, "Artifacts must include test_predictions path"
+    pred_path = artifacts["test_predictions"]
+    assert pred_path.endswith("test_predictions.parquet")
+
+    import pyarrow.parquet as pq
+    table = pq.read_table(pred_path)
+    df = table.to_pandas()
+    assert len(df) == 20
+    required_cols = {"symbol", "date", "probability", "confident", "actual", "limit_up_like"}
+    assert required_cols.issubset(set(df.columns)), f"Missing columns: {required_cols - set(df.columns)}"
+    assert int(df["confident"].sum()) == 5
+
+    assert result["test_predictions_path"] == pred_path
+    assert result["test_predictions_rows"] == 20
+    assert result["high_confident_rows"] == 5
+
+
+def test_write_gpu_probe_artifacts_handles_missing_predictions(app_config):
+    store = SimpleNamespace(config=app_config)
+    result = {
+        "model": "stub",
+        "model_kind": "stub",
+        "accuracy": 0.8,
+        "brier": 0.2,
+        "acceptance": {"passed": False, "status": "research_only"},
+        "lockbox_role": "seen_research",
+        "final_acceptance_eligible": False,
+        "feature_set": "expanded",
+        "features": ["close"],
+        "feature_cache": {},
+        "external_factors": [],
+        "data_loader": {},
+        "rows_total": 100,
+        "symbols_considered": 5,
+        "symbol_frames_kept": 5,
+        "split_manifest": {},
+        "selector_coverage_weight": 0.02,
+        "candidate_family": "all",
+    }
+    artifacts = gpu_probe._write_gpu_probe_artifacts(store, result)
+
+    assert "test_predictions" not in artifacts
+    assert "test_predictions_path" not in result
+
+
+def test_test_predictions_confident_count_matches_metrics(app_config):
+    store = SimpleNamespace(config=app_config)
+    pred_df = _make_stub_test_predictions_df(30)
+    pred_df.loc[pred_df.index[-8:], "confident"] = 1
+    pred_df.loc[pred_df.index[:-8], "confident"] = 0
+    expected_hc = 8
+    result = {
+        "_test_predictions_df": pred_df,
+        "model": "stub",
+        "model_kind": "stub",
+        "accuracy": 0.8,
+        "brier": 0.2,
+        "acceptance": {"passed": False, "status": "research_only"},
+        "lockbox_role": "seen_research",
+        "final_acceptance_eligible": False,
+        "feature_set": "expanded",
+        "features": ["close"],
+        "feature_cache": {},
+        "external_factors": [],
+        "data_loader": {},
+        "rows_total": 100,
+        "symbols_considered": 5,
+        "symbol_frames_kept": 5,
+        "split_manifest": {},
+        "selector_coverage_weight": 0.02,
+        "candidate_family": "all",
+    }
+    gpu_probe._write_gpu_probe_artifacts(store, result)
+
+    assert result["high_confident_rows"] == expected_hc
+
+    import pyarrow.parquet as pq
+    df = pq.read_table(result["test_predictions_path"]).to_pandas()
+    assert int(df["confident"].sum()) == expected_hc
+
+
+def test_test_predictions_filterable_by_date(app_config):
+    store = SimpleNamespace(config=app_config)
+    pred_df = _make_stub_test_predictions_df(20)
+    target_date = pred_df["date"].iloc[5]
+    result = {
+        "_test_predictions_df": pred_df,
+        "model": "stub",
+        "model_kind": "stub",
+        "accuracy": 0.8,
+        "brier": 0.2,
+        "acceptance": {"passed": False, "status": "research_only"},
+        "lockbox_role": "seen_research",
+        "final_acceptance_eligible": False,
+        "feature_set": "expanded",
+        "features": ["close"],
+        "feature_cache": {},
+        "external_factors": [],
+        "data_loader": {},
+        "rows_total": 100,
+        "symbols_considered": 5,
+        "symbol_frames_kept": 5,
+        "split_manifest": {},
+        "selector_coverage_weight": 0.02,
+        "candidate_family": "all",
+    }
+    gpu_probe._write_gpu_probe_artifacts(store, result)
+
+    import pyarrow.parquet as pq
+    df = pq.read_table(result["test_predictions_path"]).to_pandas()
+    day_df = df[df["date"] == target_date]
+    assert len(day_df) > 0, "Should be able to filter test_predictions by a specific date"
+    assert "symbol" in day_df.columns
+    assert "probability" in day_df.columns
+    assert "confident" in day_df.columns
+    assert "actual" in day_df.columns
