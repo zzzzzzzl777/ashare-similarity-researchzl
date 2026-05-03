@@ -47,6 +47,12 @@ def create_app() -> FastAPI:
     app.state.app_config = config
     app.state.search_response_cache = SearchResponseCache()
     app.state.prediction_response_cache = PredictionResponseCache()
+
+    from ashare_similarity.prediction.signals.config import SignalConfig
+    from ashare_similarity.prediction.signals.service import SignalService
+
+    app.state.signal_service = SignalService(SignalConfig.from_app_config(config))
+
     static_dir = _static_dir()
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 

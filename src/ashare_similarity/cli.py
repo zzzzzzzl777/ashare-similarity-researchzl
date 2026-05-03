@@ -148,6 +148,7 @@ def _build_parser() -> argparse.ArgumentParser:
     gpu_probe.add_argument("--refresh-feature-cache", action="store_true")
     gpu_probe.add_argument("--lockbox-role", choices=["seen_research", "final_unseen"], default="seen_research")
     gpu_probe.add_argument("--selector-coverage-weight", type=float, default=0.02)
+    gpu_probe.add_argument("--exclude-event-limit-up", action=argparse.BooleanOptionalAction, default=True)
     gpu_probe.add_argument("--exclude-feature-prefix", nargs="*", default=None, help="Drop features matching any prefix before training (ablation)")
 
     prediction_build_dataset = subparsers.add_parser(
@@ -201,6 +202,13 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_PORT_SCAN_LIMIT,
         help="首选端口被占用时，继续尝试的端口数量",
     )
+
+    build_signals = subparsers.add_parser(
+        "build-signals",
+        help="离线构建历史回测信号缓存（训练模型、复刻 selector、生成 signal_cache.parquet）",
+    )
+    build_signals.add_argument("--frozen-candidates", default=None, help="Override frozen_candidates JSON path")
+    build_signals.add_argument("--force-rebuild", action="store_true", help="Ignore existing cache, regenerate")
 
     if "train-prediction" in subparsers.choices:
         subparsers.choices["train-prediction"].add_argument("--approved-run-id")
@@ -652,6 +660,23 @@ def handle_maintain(
     print(_serialize(summary))
 
 
+def handle_build_signals(*, frozen_candidates: str | None, force_rebuild: bool) -> None:
+    import logging
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s — %(message)s")
+    from pathlib import Path
+
+    from ashare_similarity.config import get_default_config
+    from ashare_similarity.prediction.signals.cache import build_signal_cache
+    from ashare_similarity.prediction.signals.config import SignalConfig
+
+    config = get_default_config()
+    signal_config = SignalConfig.from_app_config(config)
+    fc_path = Path(frozen_candidates) if frozen_candidates else None
+    result = build_signal_cache(signal_config, frozen_candidates_path=fc_path, force_rebuild=force_rebuild)
+    print(_serialize(result))
+
+
 def handle_status(frequency: str | None = None) -> None:
     runtime = get_runtime()
     print(_serialize(_status_payload_with_index_health(runtime, frequency=frequency)))
@@ -798,6 +823,7 @@ def main() -> None:
                 refresh_feature_cache=args.refresh_feature_cache,
                 lockbox_role=args.lockbox_role,
                 selector_coverage_weight=args.selector_coverage_weight,
+                exclude_event_limit_up=args.exclude_event_limit_up,
                 exclude_feature_prefix=tuple(args.exclude_feature_prefix) if args.exclude_feature_prefix else (),
             )
         )
@@ -875,6 +901,13 @@ def main() -> None:
             resume=bool(args.resume),
             window_sizes=getattr(args, "window_sizes", None) or None,
             skip_rebuild=bool(getattr(args, "skip_rebuild", False)),
+            force_rebuild=bool(getattr(args, "force_rebuild", False)),
+        )
+        return
+
+    if args.command == "build-signals":
+        handle_build_signals(
+            frozen_candidates=getattr(args, "frozen_candidates", None),
             force_rebuild=bool(getattr(args, "force_rebuild", False)),
         )
         return
