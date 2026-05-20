@@ -62,6 +62,59 @@ TUSHARE_TIER1_FEATURES: tuple[str, ...] = (
 )
 
 # ---------------------------------------------------------------------------
+# Step 4 B-group factors (registry C-IDs)
+# ---------------------------------------------------------------------------
+C009_FEATURES: tuple[str, ...] = (
+    "tushare_main_force_divergence",
+    "tushare_main_force_divergence_available",
+)
+C011_FEATURES: tuple[str, ...] = (
+    "tushare_auction_open_vwap_ratio",
+    "tushare_auction_open_vwap_ratio_available",
+)
+
+C001_FEATURES: tuple[str, ...] = (
+    "tushare_mf_flow_intensity",
+    "tushare_mf_flow_intensity_available",
+)
+# C001 STATUS: implementation_blocked — registry requires `net_mf_amount / amount`
+# (daily trading turnover), but tushare cache has no `daily` API. Current code uses
+# moneyflow total_buy_amount which is NOT equivalent. Do not use in ablation until
+# real daily `amount` is available.
+
+C004_FEATURES: tuple[str, ...] = (
+    "tushare_ff_adjusted_flow",
+    "tushare_ff_adjusted_flow_available",
+)
+C010_FEATURES: tuple[str, ...] = (
+    "tushare_float_relative_impact",
+    "tushare_float_relative_impact_available",
+)
+# C010 STATUS: implementation_blocked — registry requires `volume_ratio * volume / free_share`
+# (daily trading volume), but tushare cache has no `daily` API. Current code uses
+# moneyflow total_buy_vol which is NOT equivalent. Do not use in ablation until
+# real daily `volume` is available.
+
+# ---------------------------------------------------------------------------
+# Combination tuples (must come after all *_FEATURES definitions)
+# ---------------------------------------------------------------------------
+TIER1_PLUS_B0: tuple[str, ...] = (*TUSHARE_TIER1_FEATURES, *C011_FEATURES)
+TIER1_PLUS_B1: tuple[str, ...] = (*TUSHARE_TIER1_FEATURES, *C009_FEATURES, *C011_FEATURES)
+
+TIER1_PLUS_C009: tuple[str, ...] = (*TUSHARE_TIER1_FEATURES, *C009_FEATURES)
+TIER1_PLUS_C004: tuple[str, ...] = (*TUSHARE_TIER1_FEATURES, *C004_FEATURES)
+TIER1_PLUS_C009_C004: tuple[str, ...] = (*TUSHARE_TIER1_FEATURES, *C009_FEATURES, *C004_FEATURES)
+TIER1_PLUS_C011_C004: tuple[str, ...] = (*TUSHARE_TIER1_FEATURES, *C011_FEATURES, *C004_FEATURES)
+TIER1_PLUS_C009_C011_C004: tuple[str, ...] = (*TUSHARE_TIER1_FEATURES, *C009_FEATURES, *C011_FEATURES, *C004_FEATURES)
+
+# B2/B3 currently blocked — C001 and C010 formulas not aligned with registry.
+# TIER1_PLUS_B2: tuple[str, ...] = (*TUSHARE_TIER1_FEATURES, *C001_FEATURES, *C004_FEATURES, *C010_FEATURES)
+# TIER1_PLUS_B3: tuple[str, ...] = (
+#     *TUSHARE_TIER1_FEATURES, *C001_FEATURES, *C004_FEATURES,
+#     *C009_FEATURES, *C010_FEATURES, *C011_FEATURES,
+# )
+
+# ---------------------------------------------------------------------------
 # Variant definitions
 # ---------------------------------------------------------------------------
 VARIANTS: list[dict] = [
@@ -83,21 +136,67 @@ VARIANTS: list[dict] = [
         "extra_features": TUSHARE_TIER1_FEATURES,
         "description": "Baseline + Tushare Tier 1 moneyflow/daily_basic/stk_limit (20 extra)",
     },
+    {
+        "name": "tier1_plus_b0_c011",
+        "feature_set": "research",
+        "extra_features": TIER1_PLUS_B0,
+        "description": "Tier1 + C011 auction_open_vwap_ratio (B0: verify feature list path)",
+    },
+    {
+        "name": "tier1_plus_b1_c009_c011",
+        "feature_set": "research",
+        "extra_features": TIER1_PLUS_B1,
+        "description": "Tier1 + C009 main_force_divergence + C011 auction_open_vwap_ratio (B1)",
+    },
+    # B2 (tier1+C001+C004+C010) and B3 (tier1+ALL_5) removed:
+    # C001 and C010 are implementation_blocked — formulas use moneyflow
+    # proxies instead of real daily amount/volume. See comments above.
+    {
+        "name": "tier1_plus_c009_only",
+        "feature_set": "research",
+        "extra_features": TIER1_PLUS_C009,
+        "description": "Tier1 + C009 main_force_divergence only (isolate C009 contribution)",
+    },
+    {
+        "name": "tier1_plus_c004_only",
+        "feature_set": "research",
+        "extra_features": TIER1_PLUS_C004,
+        "description": "Tier1 + C004 ff_adjusted_flow only (isolate C004 contribution)",
+    },
+    {
+        "name": "tier1_plus_c009_c004",
+        "feature_set": "research",
+        "extra_features": TIER1_PLUS_C009_C004,
+        "description": "Tier1 + C009 + C004 (two-factor interaction without C011)",
+    },
+    {
+        "name": "tier1_plus_c011_c004",
+        "feature_set": "research",
+        "extra_features": TIER1_PLUS_C011_C004,
+        "description": "Tier1 + C011 + C004 (two-factor interaction without C009)",
+    },
+    {
+        "name": "tier1_plus_c009_c011_c004",
+        "feature_set": "research",
+        "extra_features": TIER1_PLUS_C009_C011_C004,
+        "description": "Tier1 + C009 + C011 + C004 (all three verified factors)",
+    },
 ]
 
 
-def _make_base_config(feature_set: str) -> GpuProbeConfig:
+def _make_base_config(feature_set: str, end_override: date | None = None) -> GpuProbeConfig:
     return GpuProbeConfig(
         start=date(2023, 5, 1),
-        train_end=date(2025, 6, 30),
-        test_start=date(2025, 7, 1),
-        end=date(2026, 4, 30),
+        train_end=date(2025, 12, 31),
+        test_start=date(2026, 1, 1),
+        end=end_override or date(2026, 3, 31),
         train_rows=300_000,
         test_rows=120_000,
         label_target="next_high_from_close",
         target_high_return_pct=1.0,
         feature_selection_method="stable_tail",
         max_selected_features=260,
+        min_phase_days_3=1,
         selector_coverage_weight=0.02,
         candidate_family="all",
         lockbox_role="seen_research",
@@ -204,8 +303,8 @@ def _tushare_post_diagnostic(result: dict) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Run a single variant
 # ---------------------------------------------------------------------------
-def _run_variant(store: LocalDataStore, variant: dict) -> dict:
-    config = _make_base_config(variant["feature_set"])
+def _run_variant(store: LocalDataStore, variant: dict, end_override: date | None = None) -> dict:
+    config = _make_base_config(variant["feature_set"], end_override=end_override)
     extra = variant["extra_features"]
 
     if not extra:
@@ -292,8 +391,8 @@ def _write_reports(
     lines.append("| Parameter | Value |")
     lines.append("|-----------|-------|")
     for k, v in [
-        ("start", "2023-05-01"), ("train_end", "2025-06-30"), ("test_start", "2025-07-01"),
-        ("end", "2026-04-30"), ("train_rows", "300,000"), ("test_rows", "120,000"),
+        ("start", "2023-05-01"), ("train_end", "2025-12-31"), ("test_start", "2026-01-01"),
+        ("end", "2026-03-31"), ("train_rows", "300,000"), ("test_rows", "120,000"),
         ("label_target", "next_high_from_close"), ("target_high_return_pct", "1.0"),
         ("feature_selection_method", "stable_tail"), ("max_selected_features", "260"),
         ("selector_coverage_weight", "0.02"), ("candidate_family", "all"),
@@ -424,6 +523,19 @@ def _safe_delta(a, b) -> str:
 # Main
 # ---------------------------------------------------------------------------
 def main() -> int:
+    import argparse as _ap
+    _parser = _ap.ArgumentParser()
+    _parser.add_argument("--variant", type=str, default=None,
+                         help="Run only this variant name (e.g. tushare_tier1_available)")
+    _parser.add_argument("--end-date", type=str, default=None,
+                         help="Override end date (YYYY-MM-DD), e.g. 2026-04-30 for April holdout")
+    _args = _parser.parse_args()
+    variant_filter = _args.variant
+    end_date_override = None
+    if _args.end_date:
+        y, m, d = _args.end_date.split("-")
+        end_date_override = date(int(y), int(m), int(d))
+
     configured_home = os.environ.get("ASHARE_SIMILARITY_HOME")
     if configured_home:
         runtime_home = Path(configured_home).expanduser().resolve()
@@ -457,9 +569,11 @@ def main() -> int:
     tushare_post: list[dict] | None = None
 
     for variant in VARIANTS:
+        if variant_filter and variant["name"] != variant_filter:
+            continue
         print(f"\n[ablation] Starting variant: {variant['name']}", file=sys.stderr)
         t0 = time.perf_counter()
-        result = _run_variant(store, variant)
+        result = _run_variant(store, variant, end_override=end_date_override)
         elapsed = time.perf_counter() - t0
         elapsed_list.append(elapsed)
 

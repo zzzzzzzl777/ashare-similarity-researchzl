@@ -9,7 +9,10 @@ import hashlib
 import time, json, sys
 from datetime import datetime, date, timedelta
 
-ts.set_token('05ed8ff7dbeb572be350d12fc2f1a9c3483c7e837fcb6701151f10f2')
+TUSHARE_TOKEN = (os.environ.get("TUSHARE_TOKEN") or os.environ.get("TSY_TUSHARE_TOKEN") or "").strip()
+if not TUSHARE_TOKEN:
+    raise RuntimeError("Missing TUSHARE_TOKEN or TSY_TUSHARE_TOKEN")
+ts.set_token(TUSHARE_TOKEN)
 pro = ts.pro_api()
 pro._DataApi__http_url = 'http://tsy.xiaodefa.cn'
 pro._DataApi__timeout = 120
@@ -77,7 +80,7 @@ def expected_rows(list_date_str, seg_start_str, seg_end_str):
     if actual_start >= seg_end:
         return 0
     cal_days = (seg_end - actual_start).days
-    return max(int(cal_days * 0.69 * 49), 200)
+    return max(int(cal_days * 0.69 * 49), 40)
 
 
 def is_segment_complete(df, list_date_str, seg_start_str, seg_end_str):

@@ -1,0 +1,133 @@
+{
+  "n_perturbed_rows": 3376,
+  "n_symbols": 428,
+  "coverage_pct": 23.447701069593,
+  "ohlcv_diffs": {
+    "close_mean_abs_pct": 0.141297680335151,
+    "vol_mean_pct": -2.739463088308142
+  },
+  "prob_diffs": {
+    "mean_abs": 0.006285042051524718,
+    "median_abs": 0.00357331351741097,
+    "p95_abs": 0.0221516048218037,
+    "p99_abs": 0.036392974001111036,
+    "max_abs": 0.06485762436572129
+  },
+  "correlation": {
+    "pearson": 0.9963506563819918,
+    "spearman": 0.9959469608394347
+  },
+  "daily_top10_overlaps": [
+    {
+      "date": "2026-04-01",
+      "overlap": 0.9,
+      "n_rows": 152
+    },
+    {
+      "date": "2026-04-02",
+      "overlap": 0.9,
+      "n_rows": 158
+    },
+    {
+      "date": "2026-04-03",
+      "overlap": 1.0,
+      "n_rows": 142
+    },
+    {
+      "date": "2026-04-07",
+      "overlap": 1.0,
+      "n_rows": 132
+    },
+    {
+      "date": "2026-04-08",
+      "overlap": 1.0,
+      "n_rows": 198
+    },
+    {
+      "date": "2026-04-09",
+      "overlap": 1.0,
+      "n_rows": 156
+    },
+    {
+      "date": "2026-04-10",
+      "overlap": 0.8,
+      "n_rows": 164
+    },
+    {
+      "date": "2026-04-13",
+      "overlap": 0.9,
+      "n_rows": 160
+    },
+    {
+      "date": "2026-04-14",
+      "overlap": 1.0,
+      "n_rows": 175
+    },
+    {
+      "date": "2026-04-15",
+      "overlap": 0.9,
+      "n_rows": 179
+    },
+    {
+      "date": "2026-04-16",
+      "overlap": 1.0,
+      "n_rows": 177
+    },
+    {
+      "date": "2026-04-17",
+      "overlap": 1.0,
+      "n_rows": 174
+    },
+    {
+      "date": "2026-04-20",
+      "overlap": 1.0,
+      "n_rows": 183
+    },
+    {
+      "date": "2026-04-21",
+      "overlap": 1.0,
+      "n_rows": 176
+    },
+    {
+      "date": "2026-04-22",
+      "overlap": 0.9,
+      "n_rows": 172
+    },
+    {
+      "date": "2026-04-23",
+      "overlap": 1.0,
+      "n_rows": 185
+    },
+    {
+      "date": "2026-04-24",
+      "overlap": 1.0,
+      "n_rows": 97
+    },
+    {
+      "date": "2026-04-27",
+      "overlap": 0.9,
+      "n_rows": 201
+    },
+    {
+      "date": "2026-04-28",
+      "overlap": 0.9,
+      "n_rows": 198
+    },
+    {
+      "date": "2026-04-29",
+      "overlap": 0.9,
+      "n_rows": 197
+    }
+  ],
+  "n_perturbed_features": 77,
+  "n_not_perturbed": 183,
+  "moneyflow_not_available": [
+    "tushare_net_mf_amount",
+    "tushare_lg_buy_sell_ratio",
+    "tushare_elg_buy_sell_ratio",
+    "tushare_mf_strength",
+    "tushare_sm_sell_pressure",
+    "tushare_main_force_divergence",
+    "tushare_ff_adjusted_flow"
+  ]
+}

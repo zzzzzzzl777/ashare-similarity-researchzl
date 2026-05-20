@@ -15,7 +15,7 @@ except Exception:  # pragma: no cover
     ts = None  # type: ignore[assignment]
 
 
-DEFAULT_PROXY_BASE_URL = "http://tsy.xiaodefa.cn"
+DEFAULT_PROXY_BASE_URL = "http://124.220.22.110:8020/"
 
 
 class _RateLimiter:

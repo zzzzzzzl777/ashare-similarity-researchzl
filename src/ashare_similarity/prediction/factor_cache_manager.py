@@ -69,15 +69,16 @@ def merge_factor_frames(
     *,
     date_columns: tuple[str, ...] = ("date",),
 ) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
-    merged = base.copy()
+    merged = base
     for column in date_columns:
         if column in merged.columns:
             merged[column] = pd.to_datetime(merged[column], errors="coerce")
     reports: list[dict[str, Any]] = []
     for factor in factors:
-        frame = factor.frame.copy()
+        frame = factor.frame
         for key in factor.join_keys:
             if key in date_columns and key in frame.columns:
+                frame = frame.copy() if frame is factor.frame else frame
                 frame[key] = pd.to_datetime(frame[key], errors="coerce")
         missing = [column for column in [*factor.join_keys, *factor.columns] if column not in frame.columns]
         if missing:
@@ -98,7 +99,7 @@ def merge_factor_frames(
             if existing:
                 merged.loc[:, existing] = availability_frame[existing]
             if new_columns:
-                merged = pd.concat([merged, availability_frame[new_columns]], axis=1).copy()
+                merged = pd.concat([merged, availability_frame[new_columns]], axis=1)
         coverage = {
             "name": factor.name,
             "source": factor.source,

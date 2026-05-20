@@ -43,3 +43,38 @@ tmp_*/
 .DS_Store
 Thumbs.db
 *.log
+
+# Local research/runtime dumps that should not be committed directly.
+feature_cache_main.tar.gz
+feature_cache_part_*
+catboost_info/
+logs/
+models/
+*.bak_*
+scripts/_assessment*.json
+scripts/_promote_*.json
+scripts/_queue*.json
+scripts/_queue*.txt
+scripts/_symbol_name_cache.json
+model_bundle.pt
+april_comp_result.json
+april_comp_stderr.txt
+remaining_variants.txt
+.claude/
+
+# Local scripts that still contain private provider credentials or one-off
+# operator state. Keep them local until they are sanitized deliberately.
+scripts/benchmark_1min_speed.py
+scripts/pull_new_perdate_apis.py
+scripts/pull_pledge_stat_perstock.py
+scripts/pull_stk_mins_1min.py
+scripts/pull_stk_mins_1min_split.py
+scripts/repair_cyq_perf_gaps.py
+scripts/repair_perdate_gaps.py
+scripts/repair_stk_mins_1min_gaps.py
+scripts/repair_stk_mins_gaps.py
+scripts/run_data_backfill.py
+scripts/run_data_backfill_parallel.py
+scripts/speed_test_production.py
+scripts/tushare_init.py
+scripts/tushare_proxy_init.py

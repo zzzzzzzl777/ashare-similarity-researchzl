@@ -217,9 +217,10 @@ def _compute_board_quality_trend(df: pd.DataFrame) -> None:
     high = df["high"].values
     low = df["low"].values
     close_arr = df["close"].values
+    high_low = high - low
     close_pos = np.where(
-        high > low,
-        (close_arr - low) / (high - low),
+        high_low > 0,
+        np.divide(close_arr - low, high_low, out=np.full_like(close_arr, 0.5, dtype=np.float64), where=high_low > 0),
         0.5,
     )
 

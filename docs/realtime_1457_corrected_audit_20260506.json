@@ -1,0 +1,25 @@
+{
+  "generated_at": "2026-05-06T15:28:38.675554",
+  "run_type": "post_1457_rescue",
+  "raw_scored_count": 670,
+  "threshold": 0.52,
+  "threshold_passed_count": 670,
+  "tradability_gate_passed_count": 650,
+  "final_candidate_count": 650,
+  "failed_gate_reasons": {
+    "st_or_risk_count": 17,
+    "suspended_or_no_volume_count": 0,
+    "limit_up_or_near_limit_count": 5,
+    "price_abnormal_count": 0
+  },
+  "turnover_missing_count": 670,
+  "conclusion": "当前不产生正式候选。short_only=False + turnover全缺失 + 概率分布异常。仅工程诊断。",
+  "probability_anomaly": {
+    "min": 0.5999407,
+    "median": 0.74254286,
+    "max": 1.0,
+    "unique_values": 23,
+    "all_above_threshold": true,
+    "root_cause": "short_only=False使全池无差别评分; turnover缺失导致feature分布偏移; isotonic calibration阶梯效应"
+  }
+}

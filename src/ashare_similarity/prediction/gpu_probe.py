@@ -16,7 +16,7 @@ _PREDICTION_CAPTURE: dict[str, Any] | None = None
 
 from ashare_similarity.data.storage import LocalDataStore
 from ashare_similarity.prediction.acceptance import AcceptanceThresholds, build_prediction_acceptance
-from ashare_similarity.prediction.factor_cache_manager import merge_factor_frames
+from ashare_similarity.prediction.factor_cache_manager import FactorFrame, merge_factor_frames
 from ashare_similarity.prediction.free_data_factors import (
     BOARD_STRUCTURE_COLUMNS,
     MARKET_EMOTION_COLUMNS,
@@ -783,10 +783,14 @@ class GpuProbeConfig:
     intraday_factor_frequency: str = "5"
     use_feature_cache: bool = True
     refresh_feature_cache: bool = False
+    build_feature_cache_only: bool = False
+    context_subset_only: bool = False
+    force_cpu: bool = False
     lockbox_role: str = "seen_research"
     selector_coverage_weight: float = 0.02
     exclude_event_limit_up: bool = True
     exclude_feature_prefix: tuple[str, ...] = ()
+    exclude_feature_names: tuple[str, ...] = ()
 
 
 def run_gpu_next_day_probe(store: LocalDataStore, config: GpuProbeConfig) -> dict[str, Any]:
@@ -805,7 +809,7 @@ def run_gpu_next_day_probe(store: LocalDataStore, config: GpuProbeConfig) -> dic
     except Exception as exc:  # pragma: no cover - runtime dependency issue
         return {"status": "torch_unavailable", "error": str(exc)}
 
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cpu" if config.force_cpu else ("cuda:0" if torch.cuda.is_available() else "cpu"))
     effective_target_accuracy = _effective_target_accuracy(config)
     effective_test_rows = _effective_required_test_rows(config)
     rng = np.random.default_rng(config.seed)
@@ -816,6 +820,8 @@ def run_gpu_next_day_probe(store: LocalDataStore, config: GpuProbeConfig) -> dic
     rng.shuffle(symbols)
     if config.max_symbols is not None:
         symbols = symbols[: max(0, int(config.max_symbols))]
+    if config.context_subset_only:
+        context_symbols = list(symbols)
 
     feature_cache = _feature_cache_descriptor(store, config, symbols=symbols, context_symbols=context_symbols)
     loader_diagnostics: dict[str, Any] = {
@@ -827,12 +833,20 @@ def run_gpu_next_day_probe(store: LocalDataStore, config: GpuProbeConfig) -> dic
     examples_count = 0
     free_factor_reports: list[dict[str, Any]] = list(feature_cache.get("factor_reports") or [])
     active_rank_filter_report: dict[str, Any] = {}
+    feature_names: tuple[str, ...] | None = None
+    if not config.build_feature_cache_only:
+        feature_names = _effective_feature_names_for_config(config)
     if feature_cache.get("hit"):
-        data = pd.read_parquet(feature_cache["path"])
+        data = _read_feature_cache_for_config(
+            Path(feature_cache["path"]),
+            config=config,
+            feature_names=feature_names,
+            diagnostics=loader_diagnostics,
+        )
         data, active_rank_filter_report = _apply_active_anomaly_filter(data, config)
         examples_count = int(feature_cache.get("symbol_frames_kept") or data["symbol"].nunique())
         print(
-            f"[gpu_probe] feature_cache hit rows={len(data)} path={feature_cache['path']}",
+            f"[gpu_probe] feature_cache hit rows={len(data)} cols={len(data.columns)} path={feature_cache['path']}",
             file=sys.stderr,
             flush=True,
         )
@@ -910,13 +924,38 @@ def run_gpu_next_day_probe(store: LocalDataStore, config: GpuProbeConfig) -> dic
             "active_rank_filter": active_rank_filter_report,
         }
 
-    feature_names = _feature_names_for_config(config)
-    if config.exclude_feature_prefix:
-        feature_names = tuple(
-            f for f in feature_names
-            if not any(f.startswith(p) for p in config.exclude_feature_prefix)
-        )
-    data = _ensure_feature_columns(data.sort_values("date"))
+    if config.build_feature_cache_only:
+        data = data.sort_values("date")
+        return {
+            "status": "feature_cache_ready",
+            "device": str(device),
+            "rows_total": int(len(data)),
+            "columns_total": int(len(data.columns)),
+            "symbols_considered": int(len(symbols)),
+            "symbol_frames_kept": int(examples_count),
+            "feature_build_seconds": round(float(time.perf_counter() - feature_started), 3),
+            "data_loader": loader_diagnostics,
+            "feature_cache": feature_cache,
+            "external_factors": free_factor_reports,
+            "active_rank_filter": active_rank_filter_report,
+        }
+
+    if feature_names is None:
+        feature_names = _effective_feature_names_for_config(config)
+
+    _seen_fn: set = set()
+    _dedup_removed: list = []
+    _dedup_feature_names: list = []
+    for _fn in feature_names:
+        if _fn in _seen_fn:
+            _dedup_removed.append(_fn)
+        else:
+            _seen_fn.add(_fn)
+            _dedup_feature_names.append(_fn)
+    feature_names = tuple(_dedup_feature_names)
+    _duplicates_removed_count = len(_dedup_removed)
+
+    data = _ensure_feature_columns(data.sort_values("date"), feature_names=feature_names)
     data["label_date"] = pd.to_datetime(data["label_date"], errors="coerce")
     data = data.dropna(subset=["date", "label_date"])
 
@@ -1007,6 +1046,9 @@ def run_gpu_next_day_probe(store: LocalDataStore, config: GpuProbeConfig) -> dic
             "candidate_family": str(config.candidate_family),
             "selector_coverage_weight": float(config.selector_coverage_weight),
             "exclude_feature_prefix": list(config.exclude_feature_prefix),
+            "exclude_feature_names": list(config.exclude_feature_names),
+            "duplicates_removed": _dedup_removed,
+            "duplicates_removed_count": _duplicates_removed_count,
             "intraday_factor_frequency": str(config.intraday_factor_frequency),
             "features": list(feature_names),
             "rows_total": int(len(data)),
@@ -1076,6 +1118,7 @@ def run_gpu_next_day_probe(store: LocalDataStore, config: GpuProbeConfig) -> dic
             "test_end": str(test["date"].max().date()),
             "gpu_scope": "feature_matrix_and_torch_training" if device.type == "cuda" else "cpu_fallback",
             "gpu_enabled": bool(device.type == "cuda"),
+            "force_cpu": bool(config.force_cpu),
             "full_gpu_pipeline": False,
             "cpu_stages": [
                 "parquet_io",
@@ -1811,7 +1854,9 @@ def _purged_train_validation_split(
     max_fit_rows: int,
     seed: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
-    frame = train.copy()
+    split_columns = [column for column in ("date", "label_date", "symbol") if column in train.columns]
+    frame = train.loc[:, split_columns].copy()
+    frame["_source_index"] = train.index.to_numpy()
     frame["label_date"] = pd.to_datetime(frame["label_date"], errors="coerce")
     frame = frame.dropna(subset=["label_date"])
     if frame.empty:
@@ -1827,7 +1872,11 @@ def _purged_train_validation_split(
         seed=seed,
         allow_row_split_fallback=False,
     )
-    fit, valid, info = _official_purged_train_validation_split(frame, split_config)
+    fit_meta, valid_meta, info = _official_purged_train_validation_split(frame, split_config)
+    fit_index = fit_meta["_source_index"].to_numpy()
+    valid_index = valid_meta["_source_index"].to_numpy()
+    fit = train.loc[fit_index].copy()
+    valid = train.loc[valid_index].copy()
     info["embargo_label_days"] = int(embargo_label_days)
     info["max_fit_rows"] = int(max_fit_rows)
     return fit, valid, info
@@ -2272,7 +2321,34 @@ def _train_and_score(
             confident,
             threshold=threshold,
         )
+    # --- Model bundle auto-save: construct and self-validate ---
+    _bundle_payload = None
+    _bundle_validation = None
+    try:
+        _raw_x_test_for_bundle = torch.as_tensor(
+            test.loc[:, feature_names].to_numpy(dtype=np.float32), device=device
+        )
+        _bundle_payload = _build_model_bundle_payload(
+            best,
+            mean=mean,
+            std=std,
+            selected_indices=selected_indices,
+            feature_names=feature_names,
+            selected_feature_names=selected_feature_names,
+            iso_model=iso_model,
+            calibration_used=calibration_used,
+        )
+        _bundle_validation = _validate_model_bundle(
+            _bundle_payload,
+            raw_test_features=_raw_x_test_for_bundle,
+            expected_prob=prob,
+            device=device,
+        )
+        del _raw_x_test_for_bundle
+    except Exception as _bundle_exc:
+        _bundle_validation = {"passed": False, "error": str(_bundle_exc)}
     _pred_df = test[["symbol", "date", "label_date"]].copy()
+    _pred_df.insert(0, "test_row_id", np.arange(len(_pred_df), dtype=np.int32))
     _prob_np = prob.detach().cpu().numpy().flatten()
     _pred_df["probability"] = _prob_np
     _pred_df["predicted_label"] = (_prob_np >= threshold).astype(np.int8)
@@ -2338,6 +2414,8 @@ def _train_and_score(
         "candidate_reports": candidate_reports,
         "candidate_warnings": candidate_warnings,
         "date_bucket_stability": date_bucket_stability,
+        "_model_bundle_payload": _bundle_payload,
+        "_model_bundle_validation": _bundle_validation,
     }
 
 
@@ -2759,13 +2837,59 @@ def _attach_intraday_factor_features(
     if data.empty:
         return _zero_intraday_factor_features(data, status="empty_base")
     symbols = sorted({str(symbol).zfill(6) for symbol in data["symbol"].dropna().astype(str).unique()})
-    minute_bars = _load_intraday_factor_bars(store, symbols=symbols, config=config)
-    if minute_bars.empty:
-        return _zero_intraday_factor_features(data, status="no_cached_minute_data")
+    required_dates = data.loc[:, ["symbol", "date"]].copy()
+    required_dates["symbol"] = required_dates["symbol"].astype(str).str.zfill(6)
+    required_dates["date"] = pd.to_datetime(required_dates["date"], errors="coerce").dt.normalize()
+    required_dates = required_dates.dropna(subset=["symbol", "date"]).drop_duplicates()
+    batch_size = 40
+    factor_frames: list[pd.DataFrame] = []
     try:
-        factor = build_intraday_factor_frame(minute_bars)
-        if factor.frame.empty:
+        for start_idx in range(0, len(symbols), batch_size):
+            batch_symbols = symbols[start_idx : start_idx + batch_size]
+            minute_bars = _load_intraday_factor_bars(store, symbols=batch_symbols, config=config)
+            if minute_bars.empty:
+                continue
+            needed = required_dates[required_dates["symbol"].isin(batch_symbols)]
+            if needed.empty:
+                continue
+            minute_bars["_factor_date"] = pd.to_datetime(minute_bars["timestamp"], errors="coerce").dt.normalize()
+            minute_bars = minute_bars.merge(
+                needed,
+                left_on=["symbol", "_factor_date"],
+                right_on=["symbol", "date"],
+                how="inner",
+                suffixes=("", "_needed"),
+            )
+            minute_bars = minute_bars.drop(columns=["_factor_date", "date"], errors="ignore")
+            if minute_bars.empty:
+                continue
+            factor = build_intraday_factor_frame(minute_bars)
+            if not factor.frame.empty:
+                factor_frames.append(factor.frame)
+            if start_idx == 0 or (start_idx + batch_size) % 400 == 0 or (start_idx + batch_size) >= len(symbols):
+                print(
+                    f"[gpu_probe] intraday_factor_batches {min(start_idx + batch_size, len(symbols))}/{len(symbols)} "
+                    f"daily_frames={sum(len(frame) for frame in factor_frames)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        if not factor_frames:
             return _zero_intraday_factor_features(data, status="no_intraday_factor_rows")
+        frame = pd.concat(factor_frames, ignore_index=True)
+        frame["symbol"] = frame["symbol"].astype(str).str.zfill(6)
+        frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+        frame = frame.dropna(subset=["symbol", "date"])
+        if frame.duplicated(["symbol", "date"]).any():
+            frame = frame.sort_values(["symbol", "date"]).drop_duplicates(["symbol", "date"], keep="last")
+        factor = FactorFrame(
+            name="intraday_structure",
+            frame=frame[["symbol", "date", *INTRADAY_FACTOR_COLUMNS]].copy(),
+            columns=INTRADAY_FACTOR_COLUMNS,
+            source="cached_minute_bars",
+            asof_time="after_close",
+            lag_rule="T-day minute bars up to close only; usable for T+1 prediction.",
+            join_keys=("symbol", "date"),
+        )
         merged, reports = merge_factor_frames(data, [factor])
     except Exception as exc:
         out, reports = _zero_intraday_factor_features(data, status="failed")
@@ -2789,10 +2913,18 @@ def _attach_tushare_factor_features(
     if not tushare_dir.is_dir():
         return _zero_tushare_factor_features(data, status="no_tushare_dir")
     try:
-        factor = build_tushare_factors(tushare_dir)
+        dates = pd.to_datetime(data["date"], errors="coerce") if "date" in data.columns else pd.Series(dtype="datetime64[ns]")
+        factor = build_tushare_factors(
+            tushare_dir,
+            symbols={str(symbol).zfill(6) for symbol in data["symbol"].dropna().astype(str).unique()},
+            start=dates.min() if dates.notna().any() else None,
+            end=dates.max() if dates.notna().any() else None,
+        )
         if factor.frame.empty:
             return _zero_tushare_factor_features(data, status="no_tushare_data")
         merged, reports = merge_factor_frames(data, [factor])
+        merged = _inject_tushare_intraday_aliases_from_minute_factors(merged)
+        reports = _refresh_tushare_alias_reports(merged, reports)
     except Exception as exc:
         out, reports = _zero_tushare_factor_features(data, status="failed")
         reports[0]["error"] = str(exc)
@@ -2802,12 +2934,80 @@ def _attach_tushare_factor_features(
     return merged, reports
 
 
+TUSHARE_INTRADAY_ALIAS_SOURCES = {
+    "tushare_last_30min_return": "minute_last_30min_return",
+    "tushare_first_15min_volume_ratio": "minute_first_15min_volume_ratio",
+    "tushare_vwap_deviation": "minute_vwap_deviation_eod",
+    "tushare_intraday_volatility": "minute_realized_volatility_5min",
+    "tushare_up_volume_ratio": "minute_up_volume_ratio",
+    "tushare_high_time_pct": "minute_high_point_time",
+    "tushare_close_vs_vwap": "minute_vwap_deviation_eod",
+}
+
+
+def _inject_tushare_intraday_aliases_from_minute_factors(data: pd.DataFrame) -> pd.DataFrame:
+    out = data
+    additions: dict[str, pd.Series] = {}
+    for target, source in TUSHARE_INTRADAY_ALIAS_SOURCES.items():
+        if source not in out.columns:
+            continue
+        source_values = pd.to_numeric(out[source], errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        target_values = pd.to_numeric(out[target], errors="coerce") if target in out.columns else pd.Series(np.nan, index=out.index)
+        target_available = f"{target}_available"
+        source_available = f"{source}_available"
+        if target_available in out.columns:
+            available_values = pd.to_numeric(out[target_available], errors="coerce").fillna(0.0)
+        else:
+            available_values = pd.Series(0.0, index=out.index)
+        missing_mask = available_values <= 0.0
+        if missing_mask.any():
+            filled = target_values.copy()
+            filled.loc[missing_mask] = source_values.loc[missing_mask]
+            additions[target] = filled.astype(np.float32)
+        if source_available in out.columns:
+            source_avail = pd.to_numeric(out[source_available], errors="coerce").fillna(0.0)
+        else:
+            source_avail = pd.Series(1.0, index=out.index)
+        additions[target_available] = np.maximum(available_values.to_numpy(dtype=np.float32), source_avail.to_numpy(dtype=np.float32))
+    if additions:
+        out = pd.concat([out.drop(columns=[c for c in additions if c in out.columns], errors="ignore"), pd.DataFrame(additions, index=out.index)], axis=1)
+    return out
+
+
+def _refresh_tushare_alias_reports(data: pd.DataFrame, reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not reports:
+        return reports
+    refreshed: list[dict[str, Any]] = []
+    for report in reports:
+        if report.get("name") != "tushare_factors":
+            refreshed.append(report)
+            continue
+        updated = dict(report)
+        columns = list(updated.get("columns") or [])
+        availability_columns = [f"{column}_available" for column in columns if f"{column}_available" in data.columns]
+        if availability_columns:
+            coverage_frame = data[availability_columns].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+            updated["coverage_rate"] = float(coverage_frame.mean(axis=1).mean()) if len(coverage_frame) else 0.0
+        null_rates = dict(updated.get("null_rates") or {})
+        alias_targets = [column for column in TUSHARE_INTRADAY_ALIAS_SOURCES if column in columns and f"{column}_available" in data.columns]
+        for column in alias_targets:
+            available = pd.to_numeric(data[f"{column}_available"], errors="coerce").fillna(0.0)
+            null_rates[column] = float(1.0 - available.mean()) if len(available) else 1.0
+        updated["null_rates"] = null_rates
+        updated["alias_injection"] = {
+            "status": "refreshed_after_minute_factor_alias_fill",
+            "source_map": dict(TUSHARE_INTRADAY_ALIAS_SOURCES),
+        }
+        refreshed.append(updated)
+    return refreshed
+
+
 def _zero_tushare_factor_features(
     data: pd.DataFrame,
     *,
     status: str,
 ) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
-    out = data.copy()
+    out = data
     for column in GPU_PROBE_TUSHARE_FACTOR_FEATURES:
         out[column] = 0.0
     return out, [
@@ -2848,7 +3048,7 @@ def _zero_tgb_factor_features(
     *,
     status: str,
 ) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
-    out = data.copy()
+    out = data
     for column in GPU_PROBE_TGB_FACTOR_FEATURES:
         out[column] = 0.0
     return out, [
@@ -2876,7 +3076,13 @@ def _attach_ths_sector_features(
     if not tushare_dir.is_dir():
         return _zero_ths_sector_features(data, status="no_tushare_dir")
     try:
-        factor = build_ths_sector_factors(tushare_dir)
+        dates = pd.to_datetime(data["date"], errors="coerce") if "date" in data.columns else pd.Series(dtype="datetime64[ns]")
+        factor = build_ths_sector_factors(
+            tushare_dir,
+            symbols={str(symbol).zfill(6) for symbol in data["symbol"].dropna().astype(str).unique()},
+            start=dates.min() if dates.notna().any() else None,
+            end=dates.max() if dates.notna().any() else None,
+        )
         if factor.frame.empty:
             return _zero_ths_sector_features(data, status="no_ths_sector_data")
         merged, reports = merge_factor_frames(data, [factor])
@@ -2894,7 +3100,7 @@ def _zero_ths_sector_features(
     *,
     status: str,
 ) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
-    out = data.copy()
+    out = data
     for column in GPU_PROBE_THS_SECTOR_FEATURES:
         out[column] = 0.0
     return out, [
@@ -2917,6 +3123,10 @@ def _load_intraday_factor_bars(
     config: GpuProbeConfig,
 ) -> pd.DataFrame:
     frequency = str(config.intraday_factor_frequency)
+    tushare_frame = _load_tushare_cached_intraday_factor_bars(store, symbols=symbols, config=config)
+    if not tushare_frame.empty:
+        return tushare_frame
+
     batch_loader = getattr(store, "load_market_data", None)
     if callable(batch_loader) and symbols:
         try:
@@ -2931,9 +3141,8 @@ def _load_intraday_factor_bars(
                 return _normalize_intraday_factor_bars(frame)
             if isinstance(loaded, pd.DataFrame) and not loaded.empty:
                 return _normalize_intraday_factor_bars(loaded)
-            return pd.DataFrame()
         except Exception:
-            return pd.DataFrame()
+            pass
 
     loader = getattr(store, "load_bars", None)
     if not callable(loader):
@@ -2954,6 +3163,55 @@ def _load_intraday_factor_bars(
         frame = frame.copy()
         if "symbol" not in frame.columns:
             frame["symbol"] = symbol
+        frames.append(frame)
+    if not frames:
+        return pd.DataFrame()
+    return _normalize_intraday_factor_bars(pd.concat(frames, ignore_index=True))
+
+
+def _load_tushare_cached_intraday_factor_bars(
+    store: LocalDataStore,
+    *,
+    symbols: list[str],
+    config: GpuProbeConfig,
+) -> pd.DataFrame:
+    if str(config.intraday_factor_frequency) != "5":
+        return pd.DataFrame()
+    config_obj = getattr(store, "config", None)
+    storage = getattr(config_obj, "storage", None)
+    cache_dir = getattr(storage, "cache_dir", None)
+    if cache_dir is None:
+        return pd.DataFrame()
+    root = Path(cache_dir) / "prediction" / "tushare" / "stk_mins_5"
+    if not root.exists():
+        return pd.DataFrame()
+    frames: list[pd.DataFrame] = []
+    start_ts = pd.Timestamp(config.start)
+    end_ts = pd.Timestamp(config.end) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+    for symbol in symbols:
+        base = str(symbol).zfill(6)
+        candidates = (root / f"{base}.SZ.parquet", root / f"{base}.SH.parquet", root / f"{base}.BJ.parquet")
+        path = next((candidate for candidate in candidates if candidate.exists()), None)
+        if path is None:
+            continue
+        try:
+            frame = pd.read_parquet(
+                path,
+                columns=["ts_code", "trade_time", "open", "high", "low", "close", "vol", "amount"],
+            )
+        except Exception:
+            continue
+        if frame.empty or "trade_time" not in frame.columns:
+            continue
+        frame = frame.rename(columns={"trade_time": "timestamp", "ts_code": "symbol", "vol": "volume"})
+        frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
+        frame = frame[(frame["timestamp"] >= start_ts) & (frame["timestamp"] <= end_ts)]
+        if frame.empty:
+            continue
+        if "symbol" in frame.columns:
+            frame["symbol"] = frame["symbol"].astype(str).str.extract(r"(\d{6})", expand=False).fillna(base)
+        else:
+            frame["symbol"] = base
         frames.append(frame)
     if not frames:
         return pd.DataFrame()
@@ -2981,10 +3239,10 @@ def _normalize_intraday_factor_bars(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def _zero_intraday_factor_features(data: pd.DataFrame, *, status: str) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
-    out = data.copy()
+    out = data
     additions = {column: np.float32(0.0) for column in GPU_PROBE_INTRADAY_FACTOR_FEATURES}
     if additions:
-        out = pd.concat([out, pd.DataFrame(additions, index=out.index)], axis=1).copy()
+        out = pd.concat([out, pd.DataFrame(additions, index=out.index)], axis=1)
     return out, [
         {
             "name": "intraday_structure",
@@ -2999,7 +3257,7 @@ def _zero_intraday_factor_features(data: pd.DataFrame, *, status: str) -> tuple[
 
 
 def _zero_limit_pool_features(data: pd.DataFrame, *, status: str) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
-    out = data.copy()
+    out = data
     for column in GPU_PROBE_LIMIT_POOL_FACTOR_FEATURES:
         out[column] = 0.0
     return out, [
@@ -3016,7 +3274,7 @@ def _zero_limit_pool_features(data: pd.DataFrame, *, status: str) -> tuple[pd.Da
 
 
 def _zero_market_index_features(data: pd.DataFrame, *, status: str) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
-    out = data.copy()
+    out = data
     for column in GPU_PROBE_CROSS_MARKET_FEATURES:
         out[column] = 0.0
         out[f"{column}_available"] = 0.0
@@ -3034,9 +3292,103 @@ def _zero_market_index_features(data: pd.DataFrame, *, status: str) -> tuple[pd.
     ]
 
 
-def _ensure_feature_columns(data: pd.DataFrame) -> pd.DataFrame:
+FEATURE_CACHE_REQUIRED_COLUMNS: tuple[str, ...] = (
+    "symbol",
+    "date",
+    "label_date",
+    "actual",
+    "next_close_return_pct",
+    "next_high_return_pct",
+    "next_low_return_pct",
+    "next_return_pct",
+    "next_close_up",
+    "hard_to_hold_2pct",
+    "hard_to_hold_3pct",
+    "close",
+    "limit_up_like",
+)
+
+
+def _effective_feature_names_for_config(config: GpuProbeConfig) -> tuple[str, ...]:
+    feature_names = _feature_names_for_config(config)
+    if config.exclude_feature_prefix:
+        feature_names = tuple(
+            f for f in feature_names
+            if not any(f.startswith(p) for p in config.exclude_feature_prefix)
+        )
+    if config.exclude_feature_names:
+        excluded = set(config.exclude_feature_names)
+        feature_names = tuple(f for f in feature_names if f not in excluded)
+    return feature_names
+
+
+def _read_feature_cache_for_config(
+    path: Path,
+    *,
+    config: GpuProbeConfig,
+    feature_names: tuple[str, ...] | None,
+    diagnostics: dict[str, Any],
+) -> pd.DataFrame:
+    columns: list[str] | None = None
+    if feature_names is not None:
+        requested = dict.fromkeys((*FEATURE_CACHE_REQUIRED_COLUMNS, *feature_names))
+        try:
+            import pyarrow.parquet as pq
+
+            schema = pq.ParquetFile(path).schema_arrow
+            available = set(schema.names)
+            columns = [column for column in requested if column in available]
+            missing = [column for column in requested if column not in available]
+            if missing:
+                diagnostics.setdefault("warnings", []).append(
+                    {
+                        "code": "feature_cache_missing_requested_columns",
+                        "count": len(missing),
+                        "sample": missing[:20],
+                    }
+                )
+        except Exception as exc:
+            diagnostics.setdefault("warnings", []).append(
+                {"code": "feature_cache_schema_probe_failed", "error": repr(exc)}
+            )
+            columns = list(requested)
+
+    filters = [
+        ("date", ">=", pd.Timestamp(config.start)),
+        ("date", "<=", pd.Timestamp(config.end)),
+    ]
+    try:
+        frame = pd.read_parquet(path, columns=columns, filters=filters)
+        diagnostics["cache_read_policy"] = {
+            "columns": len(columns) if columns is not None else "all",
+            "date_start": str(config.start),
+            "date_end": str(config.end),
+            "filters_applied": True,
+        }
+        return frame
+    except Exception as exc:
+        diagnostics.setdefault("warnings", []).append(
+            {"code": "feature_cache_filtered_read_failed", "error": repr(exc)}
+        )
+        frame = pd.read_parquet(path, columns=columns)
+        if "date" in frame.columns:
+            date_values = pd.to_datetime(frame["date"], errors="coerce")
+            mask = (date_values.dt.date >= config.start) & (date_values.dt.date <= config.end)
+            frame = frame.loc[mask].copy()
+        diagnostics["cache_read_policy"] = {
+            "columns": len(columns) if columns is not None else "all",
+            "date_start": str(config.start),
+            "date_end": str(config.end),
+            "filters_applied": False,
+            "fallback": "pandas_post_filter",
+        }
+        return frame
+
+
+def _ensure_feature_columns(data: pd.DataFrame, feature_names: tuple[str, ...] | None = None) -> pd.DataFrame:
     out = data.copy()
-    for column in GPU_PROBE_ALL_FEATURES:
+    columns = feature_names if feature_names is not None else GPU_PROBE_ALL_FEATURES
+    for column in columns:
         if column not in out.columns:
             out[column] = 0.0
         out[column] = pd.to_numeric(out[column], errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
@@ -3416,6 +3768,8 @@ def _append_lockbox_ledger_record(directory: Path, result: dict[str, Any], *, ar
 
 def _write_gpu_probe_artifacts(store: LocalDataStore, result: dict[str, Any]) -> dict[str, str]:
     pred_df = result.pop("_test_predictions_df", None)
+    bundle_payload = result.pop("_model_bundle_payload", None)
+    bundle_validation = result.pop("_model_bundle_validation", None)
     config = getattr(store, "config", None)
     storage = getattr(config, "storage", None)
     report_dir = getattr(storage, "report_dir", None)
@@ -3466,6 +3820,17 @@ def _write_gpu_probe_artifacts(store: LocalDataStore, result: dict[str, Any]) ->
         result["test_predictions_path"] = str(pred_path)
         result["test_predictions_rows"] = len(pred_df)
         result["high_confident_rows"] = _hc_rows
+    if bundle_payload is not None:
+        try:
+            _serialize_model_bundle_to_disk(run_dir, bundle_payload, bundle_validation or {}, result)
+            result["model_bundle_status"] = "passed" if (bundle_validation or {}).get("passed") else "failed"
+            result["model_bundle_validation"] = bundle_validation
+        except Exception as _bndl_exc:
+            result["model_bundle_status"] = "failed"
+            result["model_bundle_error"] = str(_bndl_exc)
+    else:
+        result["model_bundle_status"] = "failed"
+        result["model_bundle_error"] = (bundle_validation or {}).get("error", "bundle payload not available")
     artifact_path = run_dir / "artifact.json"
     _write_json_artifact(artifact_path, payload)
     _write_json_artifact(run_dir / "metrics.json", _metrics_artifact(result))
@@ -3477,6 +3842,8 @@ def _write_gpu_probe_artifacts(store: LocalDataStore, result: dict[str, Any]) ->
             "feature_set": result.get("feature_set"),
             "feature_count": result.get("feature_count"),
             "features": result.get("features"),
+            "duplicates_removed": result.get("duplicates_removed"),
+            "duplicates_removed_count": result.get("duplicates_removed_count"),
             "feature_cache": result.get("feature_cache"),
             "external_factors": result.get("external_factors"),
         },
@@ -3690,6 +4057,11 @@ def _feature_cache_descriptor(
         if research_external_enabled
         else {"status": "skipped", "reason": "feature_set_not_research"}
     )
+    tushare_intraday_cache_state = (
+        _tushare_intraday_factor_cache_state(cache_dir, frequency=config.intraday_factor_frequency)
+        if research_external_enabled
+        else {"status": "skipped", "reason": "feature_set_not_research", "frequency": str(config.intraday_factor_frequency)}
+    )
     ths_sector_cache_state = (
         _ths_sector_cache_state(cache_dir)
         if expanded_cached_enabled
@@ -3721,6 +4093,7 @@ def _feature_cache_descriptor(
         "limit_pool_snapshot_state": limit_pool_snapshot_state,
         "intraday_factor_frequency": str(config.intraday_factor_frequency),
         "intraday_cache_state": intraday_cache_state,
+        "tushare_intraday_cache_state": tushare_intraday_cache_state,
         "tushare_cache_state": tushare_cache_state,
         "ths_sector_cache_state": ths_sector_cache_state,
     }
@@ -3737,6 +4110,7 @@ def _feature_cache_descriptor(
             "context_symbols_count": len(context_symbols),
             "limit_pool_snapshot_state": limit_pool_snapshot_state,
             "intraday_cache_state": intraday_cache_state,
+            "tushare_intraday_cache_state": tushare_intraday_cache_state,
             "tushare_cache_state": tushare_cache_state,
             "ths_sector_cache_state": ths_sector_cache_state,
             "hit": bool(path.exists() and not config.refresh_feature_cache),
@@ -3797,6 +4171,40 @@ def _intraday_factor_cache_state(raw_dir: Any, *, frequency: str) -> dict[str, A
     files = sorted(root.glob("*.parquet"))
     if not files:
         return {"status": "empty_minute_bar_dir", "frequency": str(frequency), "root": str(root)}
+    latest_mtime_ns = 0
+    total_size = 0
+    sample: list[dict[str, Any]] = []
+    for path in files:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        latest_mtime_ns = max(latest_mtime_ns, int(stat.st_mtime_ns))
+        total_size += int(stat.st_size)
+        if len(sample) < 50:
+            sample.append({"name": path.name, "size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns)})
+    return {
+        "status": "available",
+        "frequency": str(frequency),
+        "root": str(root),
+        "file_count": len(files),
+        "latest_mtime_ns": latest_mtime_ns,
+        "total_size": total_size,
+        "sample_hash": _hash_payload(sample),
+    }
+
+
+def _tushare_intraday_factor_cache_state(cache_dir: Any, *, frequency: str) -> dict[str, Any]:
+    if str(frequency) != "5":
+        return {"status": "skipped", "reason": "only_5min_tushare_cache_supported", "frequency": str(frequency)}
+    if cache_dir is None:
+        return {"status": "missing_cache_dir", "frequency": str(frequency)}
+    root = Path(cache_dir) / "prediction" / "tushare" / "stk_mins_5"
+    if not root.exists():
+        return {"status": "no_tushare_stk_mins_5_dir", "frequency": str(frequency), "root": str(root)}
+    files = sorted(root.glob("*.parquet"))
+    if not files:
+        return {"status": "empty_tushare_stk_mins_5_dir", "frequency": str(frequency), "root": str(root)}
     latest_mtime_ns = 0
     total_size = 0
     sample: list[dict[str, Any]] = []
@@ -4080,7 +4488,7 @@ def _fit_xgboost_candidate(
         valid_x = x_valid.detach().cpu().numpy()
         valid_y_np = y_valid.flatten().detach().cpu().numpy()
         model.fit(train_x, train_y, eval_set=[(valid_x, valid_y_np)], verbose=False)
-        valid_prob = torch.as_tensor(model.predict_proba(valid_x)[:, 1], device=device, dtype=torch.float32)
+        valid_prob = torch.as_tensor(_tree_predict_proba(model, valid_x)[:, 1], device=device, dtype=torch.float32)
         valid_y = y_valid.flatten()
         threshold, valid_accuracy, band = _best_threshold_and_confidence_band(
             valid_prob,
@@ -4129,12 +4537,11 @@ def _fit_lightgbm_candidate(
         from lightgbm import LGBMClassifier
     except Exception:
         return {}
-    if device.type == "cuda":
-        device_params = {"device_type": "gpu"}
-        model_name = "gpu_lightgbm"
-    else:
-        device_params = {"device_type": "cpu"}
-        model_name = "lightgbm_cpu_fallback"
+    # LightGBM's Windows GPU backend can abort the whole Python process on
+    # large rolling folds. Keep it as a CPU candidate so one native failure
+    # cannot invalidate a long matrix run.
+    device_params = {"device_type": "cpu"}
+    model_name = "lightgbm_cpu_stable"
 
     if variant != "baseline":
         model_name = f"{model_name}_{variant}"
@@ -4165,7 +4572,7 @@ def _fit_lightgbm_candidate(
         valid_x = x_valid.detach().cpu().numpy()
         valid_y_np = y_valid.flatten().detach().cpu().numpy()
         model.fit(train_x, train_y, eval_set=[(valid_x, valid_y_np)])
-        valid_prob = torch.as_tensor(model.predict_proba(valid_x)[:, 1], device=device, dtype=torch.float32)
+        valid_prob = torch.as_tensor(_tree_predict_proba(model, valid_x)[:, 1], device=device, dtype=torch.float32)
         valid_y = y_valid.flatten()
         threshold, valid_accuracy, band = _best_threshold_and_confidence_band(
             valid_prob,
@@ -4214,7 +4621,16 @@ def _fit_catboost_candidate(
         from catboost import CatBoostClassifier
     except Exception:
         return {}
-    task_type = "GPU" if device.type == "cuda" else "CPU"
+    import os
+
+    requested_task_type = str(os.environ.get("ASHARE_CATBOOST_TASK_TYPE", "")).strip().upper()
+    if requested_task_type in {"CPU", "GPU"}:
+        task_type = requested_task_type
+    else:
+        # CatBoost GPU can abort the whole Python process with a native CUDA OOM
+        # after Torch has reserved memory. Keep CatBoost on CPU by default; the
+        # rest of the candidate family can still use GPU.
+        task_type = "CPU"
     model_name = "gpu_catboost" if task_type == "GPU" else "catboost_cpu_fallback"
     if variant != "baseline":
         model_name = f"{model_name}_{variant}"
@@ -4242,7 +4658,7 @@ def _fit_catboost_candidate(
         valid_x = x_valid.detach().cpu().numpy()
         valid_y_np = y_valid.flatten().detach().cpu().numpy()
         model.fit(train_x, train_y, eval_set=(valid_x, valid_y_np), verbose=False)
-        valid_prob = torch.as_tensor(model.predict_proba(valid_x)[:, 1], device=device, dtype=torch.float32)
+        valid_prob = torch.as_tensor(_tree_predict_proba(model, valid_x)[:, 1], device=device, dtype=torch.float32)
         valid_y = y_valid.flatten()
         threshold, valid_accuracy, band = _best_threshold_and_confidence_band(
             valid_prob,
@@ -4273,10 +4689,22 @@ def _fit_catboost_candidate(
         return {"warning": f"catboost_candidate_{variant}_unavailable: {exc}"}
 
 
+def _tree_predict_proba(model, values):
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="X does not have valid feature names.*",
+            category=UserWarning,
+        )
+        return model.predict_proba(values)
+
+
 def _predict_xgboost_prob(model, x_values, *, device):
     import torch
 
-    values = model.predict_proba(x_values.detach().cpu().numpy())[:, 1]
+    values = _tree_predict_proba(model, x_values.detach().cpu().numpy())[:, 1]
     return torch.as_tensor(values, device=device, dtype=torch.float32)
 
 
@@ -5335,6 +5763,213 @@ def _apply_isotonic_calibration(prob, iso_model, device=None):
         return result.flatten()
     except Exception:
         return prob
+
+
+# ---------------------------------------------------------------------------
+# Model bundle auto-save helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_model_bundle_payload(
+    best: dict,
+    *,
+    mean,
+    std,
+    selected_indices,
+    feature_names: tuple,
+    selected_feature_names: tuple,
+    iso_model,
+    calibration_used: str,
+) -> dict:
+    import torch
+
+    model_kind = str(best.get("model_kind", "torch"))
+    payload = {
+        "bundle_version": 1,
+        "model_kind": model_kind,
+        "model_name": best.get("model_name"),
+        "threshold": float(best.get("threshold", 0.5)),
+        "confidence_band": best.get("confidence_band"),
+        "calibration_used": calibration_used,
+        "calibration": best.get("calibration"),
+        "mean": mean.detach().cpu().clone(),
+        "std": std.detach().cpu().clone(),
+        "selected_indices": selected_indices.detach().cpu().clone() if selected_indices is not None else None,
+        "feature_names": tuple(feature_names),
+        "selected_feature_names": tuple(selected_feature_names),
+        "iso_model": iso_model,
+    }
+    if model_kind == "ensemble_average":
+        payload["members"] = best.get("members", [])
+        payload["member_names"] = [m.get("model_name") for m in payload["members"]]
+    else:
+        payload["model"] = best.get("model")
+    return payload
+
+
+def _validate_model_bundle(
+    bundle: dict,
+    *,
+    raw_test_features,
+    expected_prob,
+    device,
+) -> dict:
+    import torch
+
+    mean = bundle["mean"].to(device)
+    std = bundle["std"].to(device)
+    selected_indices = bundle["selected_indices"]
+    if selected_indices is not None:
+        selected_indices = selected_indices.to(device)
+
+    x = (raw_test_features - mean) / std
+    if selected_indices is not None:
+        x = x[:, selected_indices]
+
+    model_kind = bundle["model_kind"]
+    with torch.no_grad():
+        if model_kind == "ensemble_average":
+            pred = _predict_average_ensemble_prob(bundle["members"], x, device=device)
+        else:
+            cand = {"model": bundle["model"], "model_kind": model_kind, "calibration": bundle.get("calibration")}
+            pred = _predict_candidate_prob(cand, x, device=device)
+
+        if bundle["calibration_used"] == "isotonic" and bundle["iso_model"] is not None:
+            pred = _apply_isotonic_calibration(pred, bundle["iso_model"], device=device)
+
+    diff = (pred - expected_prob).abs()
+    n = len(expected_prob)
+    max_abs_diff = float(diff.max().item())
+    mean_abs_diff = float(diff.mean().item())
+
+    pred_np = pred.detach().cpu().numpy().ravel()
+    expected_np = expected_prob.detach().cpu().numpy().ravel()
+
+    top_overlaps = {}
+    for k in (30, 50, 100):
+        if n >= k:
+            top_exp = set(expected_np.argsort()[-k:])
+            top_pred = set(pred_np.argsort()[-k:])
+            top_overlaps[f"top{k}_overlap"] = len(top_exp & top_pred) / k
+
+    threshold_metrics = {}
+    for t in (0.75, 0.80):
+        exp_set = set((expected_np >= t).nonzero()[0])
+        pred_set = set((pred_np >= t).nonzero()[0])
+        if exp_set:
+            recall = len(exp_set & pred_set) / len(exp_set)
+            union = exp_set | pred_set
+            jaccard = len(exp_set & pred_set) / len(union) if union else 0.0
+        else:
+            recall = 1.0
+            jaccard = 1.0
+        threshold_metrics[f"t{t:.2f}_recall"] = recall
+        threshold_metrics[f"t{t:.2f}_jaccard"] = jaccard
+        threshold_metrics[f"t{t:.2f}_expected_count"] = len(exp_set)
+        threshold_metrics[f"t{t:.2f}_pred_count"] = len(pred_set)
+
+    passed = max_abs_diff < 1e-6 and mean_abs_diff < 1e-7
+    return {
+        "passed": passed,
+        "matched_rows": n,
+        "max_abs_diff": max_abs_diff,
+        "mean_abs_diff": mean_abs_diff,
+        **top_overlaps,
+        **threshold_metrics,
+    }
+
+
+def _serialize_model_bundle_to_disk(run_dir, bundle: dict, validation: dict, result: dict):
+    import io
+    import json
+    import pickle
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    import torch
+
+    model_kind = bundle["model_kind"]
+    members_serialized = []
+
+    def _serialize_one_model(candidate: dict) -> dict:
+        mk = candidate.get("model_kind", "torch")
+        model_obj = candidate.get("model")
+        entry = {
+            "model_name": candidate.get("model_name"),
+            "model_kind": mk,
+            "calibration": candidate.get("calibration"),
+        }
+        if mk == "torch" and model_obj is not None:
+            buf = io.BytesIO()
+            torch.save(model_obj.cpu().state_dict(), buf)
+            entry["state_dict_bytes"] = buf.getvalue()
+            entry["model_class"] = type(model_obj).__name__
+            sd = model_obj.state_dict()
+            first_key = next(iter(sd))
+            entry["input_dim"] = int(sd[first_key].shape[1]) if len(sd[first_key].shape) > 1 else int(sd[first_key].shape[0])
+        elif mk in ("xgboost", "lightgbm", "catboost") and model_obj is not None:
+            entry["model_bytes"] = pickle.dumps(model_obj)
+        return entry
+
+    if model_kind == "ensemble_average":
+        for member in bundle.get("members", []):
+            members_serialized.append(_serialize_one_model(member))
+    else:
+        members_serialized.append(_serialize_one_model(bundle))
+
+    iso_bytes = None
+    if bundle.get("iso_model") is not None:
+        iso_bytes = pickle.dumps(bundle["iso_model"])
+
+    save_payload = {
+        "bundle_version": 1,
+        "model_kind": model_kind,
+        "model_name": bundle.get("model_name"),
+        "member_names": bundle.get("member_names"),
+        "calibration_used": bundle["calibration_used"],
+        "threshold": bundle["threshold"],
+        "confidence_band": bundle.get("confidence_band"),
+        "mean": bundle["mean"],
+        "std": bundle["std"],
+        "selected_indices": bundle["selected_indices"],
+        "feature_names": bundle["feature_names"],
+        "selected_feature_names": bundle["selected_feature_names"],
+        "members": members_serialized,
+        "iso_model_bytes": iso_bytes,
+    }
+
+    run_dir = Path(run_dir)
+    torch.save(save_payload, str(run_dir / "model_bundle.pt"))
+
+    meta = {
+        "bundle_version": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "model_kind": model_kind,
+        "model_name": bundle.get("model_name"),
+        "member_names": bundle.get("member_names"),
+        "calibration_used": bundle["calibration_used"],
+        "threshold": bundle["threshold"],
+        "selected_feature_count": len(bundle["selected_feature_names"]),
+        "full_feature_count": len(bundle["feature_names"]),
+        "has_isotonic": iso_bytes is not None,
+        "run_id": result.get("run_id"),
+        "train_end": (result.get("split_manifest") or {}).get("train_end"),
+        "test_start": (result.get("split_manifest") or {}).get("test_start"),
+        "end": (result.get("split_manifest") or {}).get("end"),
+        "feature_set": result.get("feature_set"),
+        "feature_hash": result.get("feature_hash"),
+        "data_hash": result.get("data_hash"),
+        "split_hash": result.get("split_hash"),
+        "min_phase_days_3": (result.get("short_filter") or {}).get("min_phase_days_3"),
+        "exclude_event_limit_up": result.get("exclude_event_limit_up"),
+        "used_factor_ids": result.get("used_factor_ids"),
+        "model_bundle_status": "passed" if validation.get("passed") else "failed",
+    }
+    with open(run_dir / "model_bundle_meta.json", "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2, ensure_ascii=False, default=str)
+
+    with open(run_dir / "model_bundle_validation.json", "w", encoding="utf-8") as f:
+        json.dump(validation, f, indent=2, ensure_ascii=False, default=str)
 
 
 def _accuracy(prob, y, *, threshold: float = 0.5) -> float:

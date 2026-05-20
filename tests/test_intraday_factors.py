@@ -49,6 +49,16 @@ def test_build_intraday_daily_factors_extracts_tail_session_signal():
     assert 0.0 <= row["volume_entropy"] <= 1.0
     assert row["up_volume_ratio"] > 0.8
     assert row["realized_volatility_5min"] > 0
+    assert row["intraday_vol_herfindahl"] > 0
+    assert 0.0 <= row["intraday_profit_ratio"] <= 1.0
+    assert row["intraday_volume_clustering"] > 1
+    assert row["eod_volume_concentration"] > 0
+    assert 0.0 <= row["trapped_volume"] <= 1.0
+    assert row["tail_volatility_ratio"] >= 0
+    assert 0.0 <= row["intraday_consolidation_duration"] <= 1.0
+    assert 0.0 <= row["intraday_breakout_bar_ratio"] <= 1.0
+    assert 0.0 <= row["intraday_volume_shrink_ratio"] <= 1.0
+    assert 0.0 <= row["prev_30min_volume_ratio"] <= 1.0
 
 
 def test_build_intraday_factor_frame_prefixes_columns_for_merge_safety():
@@ -69,6 +79,8 @@ def test_build_intraday_factor_frame_prefixes_columns_for_merge_safety():
 
     assert factor.name == "intraday_structure"
     assert "minute_intraday_return" in factor.columns
+    assert "minute_intraday_vol_herfindahl" in factor.columns
+    assert "minute_prev_30min_volume_ratio" in factor.columns
     assert "intraday_return" not in factor.columns
     assert "minute_last_30min_return" in factor.frame.columns
 
@@ -90,4 +102,3 @@ def test_last_minutes_handles_lunch_break():
     result = _last_minutes(group, minutes=30)
     assert len(result) == 6, f"expected 6 bars for 30 min with 5-min bars, got {len(result)}"
     assert result["timestamp"].iloc[0] >= pd.Timestamp("2024-06-03 11:00")
-

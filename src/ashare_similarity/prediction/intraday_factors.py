@@ -36,6 +36,21 @@ INTRADAY_FACTOR_COLUMNS: tuple[str, ...] = (
     "minute_steady_intraday_rise_score",
     "minute_morning_afternoon_imbalance",
     "minute_up_volume_ratio",
+    "minute_intraday_vol_herfindahl",
+    "minute_intraday_profit_ratio",
+    "minute_vwap_deviation_normalized",
+    "minute_intraday_volume_clustering",
+    "minute_intraday_ofi_proxy",
+    "minute_close_impact_3min",
+    "minute_eod_volume_concentration",
+    "minute_trapped_volume",
+    "minute_tail_volatility_ratio",
+    "minute_intraday_price_reversal",
+    "minute_bar_obi_proxy",
+    "minute_intraday_consolidation_duration",
+    "minute_intraday_breakout_bar_ratio",
+    "minute_intraday_volume_shrink_ratio",
+    "minute_prev_30min_volume_ratio",
 )
 
 
@@ -130,6 +145,29 @@ def build_intraday_daily_factors(minute_bars: pd.DataFrame) -> pd.DataFrame:
         volumes = group["volume"].fillna(0.0).astype(float) if "volume" in group.columns else pd.Series(0.0, index=group.index)
         price_volume_corr = _safe_corr(minute_return_pct.to_numpy(), volumes.to_numpy())
         positive_volume = float(volumes[minute_returns > 0.0].sum())
+        closes = group["close"].astype(float)
+        highs = group["high"].astype(float)
+        lows = group["low"].astype(float)
+        volume_values = volumes.to_numpy(dtype=float)
+        close_values = closes.to_numpy(dtype=float)
+        high_values = highs.to_numpy(dtype=float)
+        low_values = lows.to_numpy(dtype=float)
+        running_amount = group["amount"].fillna(0.0).astype(float).cumsum()
+        running_volume = volumes.cumsum()
+        running_vwap = (running_amount / running_volume.replace(0.0, np.nan)).ffill().fillna(day_close)
+        running_vwap_values = running_vwap.to_numpy(dtype=float)
+        price_std = float(np.nanstd(close_values))
+        avg_volume = float(np.nanmean(volume_values)) if len(volume_values) else 0.0
+        total_volume_safe = max(total_volume, 1e-12)
+        volume_share = volume_values / total_volume_safe
+        last_6_returns = minute_returns.tail(6).to_numpy(dtype=float)
+        first_half = group.iloc[: max(1, len(group) // 2)]
+        first_half_return = _pct(float(first_half["close"].iloc[-1]), float(first_half["open"].iloc[0])) if not first_half.empty else 0.0
+        abs_return_sum = float(np.abs(minute_return_pct.to_numpy(dtype=float)).sum())
+        bar_spread = np.maximum(high_values - low_values, 1e-12)
+        bar_close_position = (close_values - low_values) / bar_spread
+        decays = np.power(0.97, np.arange(len(group) - 1, -1, -1, dtype=float))
+        trapped_mask = running_vwap_values > close_values
         rows.append(
             {
                 "symbol": str(symbol).zfill(6) if symbol is not None else None,
@@ -168,6 +206,30 @@ def build_intraday_daily_factors(minute_bars: pd.DataFrame) -> pd.DataFrame:
                 * max(0.0, 1.0 - max(late_surge_ratio - 0.50, 0.0)),
                 "morning_afternoon_imbalance": _morning_afternoon_imbalance(group, volumes),
                 "up_volume_ratio": positive_volume / total_volume if total_volume > 0 else 0.0,
+                "intraday_vol_herfindahl": float(np.square(volume_share).sum()),
+                "intraday_profit_ratio": float(volume_values[close_values > running_vwap_values].sum() / total_volume_safe),
+                "vwap_deviation_normalized": _safe_div(day_close - vwap, price_std),
+                "intraday_volume_clustering": _safe_div(float(np.nanmax(volume_values)) if len(volume_values) else 0.0, avg_volume),
+                "intraday_ofi_proxy": float(np.sign(minute_returns.to_numpy(dtype=float)) @ volume_values / total_volume_safe),
+                "close_impact_3min": _pct(day_close, float(close_values[-2])) if len(close_values) >= 2 else 0.0,
+                "eod_volume_concentration": float(volume_values[-1] / total_volume_safe) if len(volume_values) else 0.0,
+                "trapped_volume": float((volume_values * trapped_mask.astype(float) * decays).sum() / total_volume_safe),
+                "tail_volatility_ratio": _safe_div(float(np.nanstd(last_6_returns)), float(np.nanstd(minute_returns.to_numpy(dtype=float)))),
+                "intraday_price_reversal": abs(first_half_return) / max(abs_return_sum, 0.05),
+                "bar_obi_proxy": float(((bar_close_position - 0.5) * volume_values).sum() / total_volume_safe),
+                "intraday_consolidation_duration": float(
+                    np.mean(np.abs(close_values - running_vwap_values) / np.maximum(running_vwap_values, 1e-12) < 0.003)
+                ),
+                "intraday_breakout_bar_ratio": float(
+                    np.mean((close_values > running_vwap_values * 1.005) & (volume_values > avg_volume * 1.5))
+                ),
+                "intraday_volume_shrink_ratio": float(np.mean(volume_values < avg_volume * 0.6)) if avg_volume > 0 else 0.0,
+                "prev_30min_volume_ratio": float(
+                    _clock_window(group, start="14:00", end="14:30")["volume"].fillna(0.0).astype(float).sum()
+                    / total_volume_safe
+                )
+                if "volume" in group.columns
+                else 0.0,
             }
         )
     return pd.DataFrame(rows)
