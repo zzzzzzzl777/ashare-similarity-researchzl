@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-import torch
+
+torch = pytest.importorskip("torch")
 
 from ashare_similarity.prediction.gpu_probe import (
     _corwin_schultz,
