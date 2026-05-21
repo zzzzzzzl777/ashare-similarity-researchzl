@@ -2302,6 +2302,10 @@ async function loadHistoricalDates() {
       opt.textContent = _histDates[i];
       sel.appendChild(opt);
     }
+    const activeTab = document.querySelector(".mode-tab.active");
+    if (_histDates.length > 0 && activeTab && activeTab.dataset.mode === "history" && _histCurrentIdx < 0) {
+      loadClosestHistorical();
+    }
   } catch (e) {}
 }
 
@@ -2321,6 +2325,12 @@ function findClosestHistDate(dateStr) {
     if (d <= target) { best = _histDates[i]; break; }
   }
   return best || _histDates[0];
+}
+
+function loadClosestHistorical() {
+  if (_histDates.length === 0) return;
+  const closest = findClosestHistDate($("today").value);
+  if (closest) loadHistorical(closest);
 }
 
 let _histLoadId = 0;
@@ -2448,18 +2458,18 @@ document.addEventListener("keydown", (e) => {
 
 // When clicking the history tab, auto-load closest available date
 document.querySelector('.mode-tab[data-mode="history"]').addEventListener("click", () => {
-  if (_histDates.length === 0) return;
-  const pickerDate = $("today").value;
-  const closest = findClosestHistDate(pickerDate);
-  if (closest) loadHistorical(closest);
+  if (_histDates.length === 0) {
+    loadHistoricalDates().then(loadClosestHistorical).catch(() => {});
+    return;
+  }
+  loadClosestHistorical();
 });
 
 // When left date picker changes, also update history if that tab is active
 $("today").addEventListener("change", () => {
   const activeTab = document.querySelector(".mode-tab.active");
   if (activeTab && activeTab.dataset.mode === "history") {
-    const closest = findClosestHistDate($("today").value);
-    if (closest) loadHistorical(closest);
+    loadClosestHistorical();
   }
   updateButtonStates();
 });
