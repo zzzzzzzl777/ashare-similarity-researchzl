@@ -1,7 +1,8 @@
 # 14:57 PhaseC Web Reproducible Release
 
 This repository contains the code and frozen runtime artifacts needed to bring
-up the current PhaseC 14:57 candidate web console after a fresh clone.
+up the current PhaseC 14:57 candidate web console after a fresh clone of the
+`codex/research-freeze-forward` branch.
 
 ## Included Runtime Artifacts
 
@@ -19,10 +20,19 @@ network fallback pull is needed.
 
 ## Fresh Clone Setup
 
+Do not use GitHub's ZIP download for this release. The runtime archives are Git
+LFS objects; a ZIP download or a clone without `git lfs pull` may contain only
+small pointer files.
+
 ```powershell
-git clone https://github.com/zzzzzzzl777/ashare-similarity-researchzl.git
+git clone --branch codex/research-freeze-forward https://github.com/zzzzzzzl777/ashare-similarity-researchzl.git
 cd ashare-similarity-researchzl
+git lfs install
 git lfs pull
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e ".[gpu]"
 powershell -ExecutionPolicy Bypass -File scripts\bootstrap_live1457_runtime.ps1
 ```
 
@@ -38,7 +48,7 @@ $env:ASHARE_SIMILARITY_RUNTIME_DATA = "D:\ashare_similarity_runtime\data"
 ## Start The Web Console
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\start_1457_web.ps1
+powershell -ExecutionPolicy Bypass -File .\start_1457_picker_web.ps1 -NoBrowser
 ```
 
 Default local URL:
@@ -59,6 +69,9 @@ with port `8765`.
 - The bundled daily bars snapshot is sufficient to reproduce the current
   frozen state. Future trading days still need daily cache refreshes and valid
   realtime network access.
+- A new machine still needs working realtime network access for the formal
+  14:57 path. Configure `TUSHARE_TOKEN` or `TSY_TUSHARE_TOKEN` when fallback
+  provider pulls are needed.
 - `scripts/realtime_1457_today_probe.py`,
   `scripts/run_1457_live_sim.py`, and `scripts/serve_1457_picker_web.py` read
   `ASHARE_SIMILARITY_RUNTIME_DATA` / `ASHARE_SIMILARITY_DATA` when the runtime

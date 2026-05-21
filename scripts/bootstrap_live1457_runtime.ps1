@@ -1,9 +1,9 @@
-$ErrorActionPreference = "Stop"
-
 param(
     [string]$RuntimeRoot = $env:ASHARE_SIMILARITY_RUNTIME_DATA,
     [switch]$SkipDailyBars
 )
+
+$ErrorActionPreference = "Stop"
 
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $ArtifactsDir = Join-Path $RepoRoot "artifacts"
