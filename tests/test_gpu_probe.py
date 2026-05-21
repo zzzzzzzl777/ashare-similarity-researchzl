@@ -174,6 +174,7 @@ def test_feature_set_keeps_noisy_research_factors_out_of_default_expanded():
 
 
 def test_expanded_feature_set_attaches_cached_factor_frames(monkeypatch, make_ohlcv_frame, tmp_path):
+    pytest.importorskip("torch")
     called: list[str] = []
 
     def _attach_tgb(data, *, daily_context_frames):
@@ -793,6 +794,7 @@ def test_final_unseen_lockbox_is_blocked_after_research_observation(app_config):
 
 
 def test_run_gpu_probe_threads_target_accuracy_into_training(monkeypatch, make_ohlcv_frame, tmp_path):
+    pytest.importorskip("torch")
     seen: dict[str, object] = {}
     symbols = ["600001", "600002"]
 
@@ -878,6 +880,7 @@ def test_run_gpu_probe_threads_target_accuracy_into_training(monkeypatch, make_o
 
 
 def test_gpu_probe_prefers_batch_market_data_loader(monkeypatch, make_ohlcv_frame, tmp_path):
+    pytest.importorskip("torch")
     pytest.importorskip("polars")
     import polars as pl
 
@@ -958,6 +961,7 @@ def test_gpu_probe_prefers_batch_market_data_loader(monkeypatch, make_ohlcv_fram
 
 
 def test_gpu_probe_reuses_feature_cache(monkeypatch, app_config, make_ohlcv_frame):
+    pytest.importorskip("torch")
     pytest.importorskip("polars")
     import polars as pl
 
@@ -1159,6 +1163,7 @@ def test_attach_intraday_factor_features_merges_cached_minute_bars():
 
 
 def test_gpu_probe_floors_target_accuracy_at_75(monkeypatch, make_ohlcv_frame, tmp_path):
+    pytest.importorskip("torch")
     seen: dict[str, object] = {}
 
     def _train_and_score(train, test, **kwargs):
