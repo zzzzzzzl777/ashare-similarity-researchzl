@@ -108,6 +108,10 @@ def _load_calendar_next_day() -> dict[date, date]:
             ts = pd.to_datetime(path.stem, format="%Y%m%d", errors="coerce")
             if pd.notna(ts):
                 dates.add(ts.date())
+    for path in REALTIME_OUTPUT_DIR.glob("sina_snapshot_postclose_*.parquet"):
+        snapshot_date = _postclose_snapshot_date_from_name(path)
+        if snapshot_date is not None and _is_valid_postclose_snapshot(path, snapshot_date):
+            dates.add(snapshot_date)
     cal_dates = sorted(dates)
     return {cal_dates[i]: cal_dates[i + 1] for i in range(len(cal_dates) - 1)}
 
@@ -160,6 +164,76 @@ def _load_symbol_daily(symbol: str) -> pd.DataFrame | None:
         return None
 
 
+_POSTCLOSE_SNAPSHOT_CACHE: dict[date, pd.DataFrame | None] = {}
+_POSTCLOSE_SNAPSHOT_VALID_CACHE: dict[Path, bool] = {}
+
+
+def _postclose_snapshot_date_from_name(path: Path) -> date | None:
+    parts = path.stem.split("_")
+    if len(parts) < 4:
+        return None
+    ts = pd.to_datetime(parts[3], format="%Y%m%d", errors="coerce")
+    return ts.date() if pd.notna(ts) else None
+
+
+def _is_valid_postclose_snapshot(path: Path, expected_date: date) -> bool:
+    if path in _POSTCLOSE_SNAPSHOT_VALID_CACHE:
+        return _POSTCLOSE_SNAPSHOT_VALID_CACHE[path]
+    try:
+        meta = pd.read_parquet(path, columns=["quote_date", "quote_time"])
+    except Exception:
+        _POSTCLOSE_SNAPSHOT_VALID_CACHE[path] = False
+        return False
+    quote_dates = pd.to_datetime(meta.get("quote_date"), errors="coerce").dropna().dt.date
+    if quote_dates.empty or set(quote_dates.unique().tolist()) != {expected_date}:
+        _POSTCLOSE_SNAPSHOT_VALID_CACHE[path] = False
+        return False
+    quote_times = meta.get("quote_time")
+    if quote_times is None:
+        _POSTCLOSE_SNAPSHOT_VALID_CACHE[path] = False
+        return False
+    latest_quote_time = quote_times.astype(str).str.slice(0, 8).max()
+    valid = latest_quote_time >= "14:59:00"
+    _POSTCLOSE_SNAPSHOT_VALID_CACHE[path] = valid
+    return valid
+
+
+def _postclose_snapshot_path(label_date: date) -> Path | None:
+    paths = sorted(
+        (
+            path
+            for path in REALTIME_OUTPUT_DIR.glob(f"sina_snapshot_postclose_{label_date:%Y%m%d}_*.parquet")
+            if _is_valid_postclose_snapshot(path, label_date)
+        ),
+        key=lambda p: (p.stat().st_mtime, p.name),
+    )
+    return paths[-1] if paths else None
+
+
+def _load_postclose_snapshot(label_date: date) -> pd.DataFrame | None:
+    if label_date in _POSTCLOSE_SNAPSHOT_CACHE:
+        return _POSTCLOSE_SNAPSHOT_CACHE[label_date]
+    path = _postclose_snapshot_path(label_date)
+    if path is None:
+        _POSTCLOSE_SNAPSHOT_CACHE[label_date] = None
+        return None
+    try:
+        snapshot = pd.read_parquet(path, columns=["symbol", "high", "latest_price"])
+    except Exception:
+        try:
+            snapshot = pd.read_parquet(path)
+        except Exception:
+            _POSTCLOSE_SNAPSHOT_CACHE[label_date] = None
+            return None
+    if "symbol" not in snapshot.columns:
+        _POSTCLOSE_SNAPSHOT_CACHE[label_date] = None
+        return None
+    snapshot = snapshot.copy()
+    snapshot["symbol"] = snapshot["symbol"].astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(6)
+    _POSTCLOSE_SNAPSHOT_CACHE[label_date] = snapshot
+    return snapshot
+
+
 def _infer_next_symbol_date(symbol: str, signal_date: date) -> date | None:
     df = _load_symbol_daily(symbol)
     if df is None or df.empty:
@@ -184,22 +258,39 @@ def _load_next_day_record(symbol: str, label_date: date | None) -> tuple[float |
                 float(high) if pd.notna(high) else None,
                 float(close) if pd.notna(close) else None,
             )
+    high = pd.NA
+    close = pd.NA
     path = TUSHARE_STK_FACTOR_DIR / f"{label_date:%Y%m%d}.parquet"
-    if not path.exists():
-        return None, None
-    try:
-        ts_df = pd.read_parquet(path, columns=["ts_code", "high", "close"])
-    except Exception:
-        return None, None
-    match = ts_df.loc[ts_df["ts_code"].astype(str).str.slice(0, 6) == symbol]
-    if match.empty:
-        return None, None
-    row = match.iloc[-1]
-    high = pd.to_numeric(row.get("high"), errors="coerce")
-    close = pd.to_numeric(row.get("close"), errors="coerce")
+    if path.exists():
+        try:
+            ts_df = pd.read_parquet(path, columns=["ts_code", "high", "close"])
+            match = ts_df.loc[ts_df["ts_code"].astype(str).str.slice(0, 6) == symbol]
+            if not match.empty:
+                row = match.iloc[-1]
+                high = pd.to_numeric(row.get("high"), errors="coerce")
+                close = pd.to_numeric(row.get("close"), errors="coerce")
+        except Exception:
+            pass
+    if pd.notna(high) and pd.notna(close):
+        return float(high), float(close)
+    snapshot = _load_postclose_snapshot(label_date)
+    if snapshot is None or snapshot.empty:
+        return (
+            float(high) if pd.notna(high) else None,
+            float(close) if pd.notna(close) else None,
+        )
+    snap_match = snapshot.loc[snapshot["symbol"].astype(str).str.zfill(6) == symbol]
+    if snap_match.empty:
+        return (
+            float(high) if pd.notna(high) else None,
+            float(close) if pd.notna(close) else None,
+        )
+    snap_row = snap_match.iloc[-1]
+    snap_high = pd.to_numeric(snap_row.get("high"), errors="coerce")
+    snap_close = pd.to_numeric(snap_row.get("latest_price"), errors="coerce")
     return (
-        float(high) if pd.notna(high) else None,
-        float(close) if pd.notna(close) else None,
+        float(snap_high) if pd.notna(snap_high) else (float(high) if pd.notna(high) else None),
+        float(snap_close) if pd.notna(snap_close) else (float(close) if pd.notna(close) else None),
     )
 
 
