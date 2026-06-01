@@ -5,11 +5,13 @@ This script keeps the dashboard history current after each trading day:
 
 1. Start from the reviewed baseline history CSV.
 2. Add the latest saved valid post-close selector CSV for each trading day.
+   If a day has no valid post-close selector, fall back to its saved valid
+   formal 14:57 selector.
 3. Recompute next-trading-day verification from daily bars when available.
 4. Write one rolling CSV that the Web UI can read.
 
-It intentionally ignores formal/test/replay outputs. The history tab is a
-post-close validation surface, not a real-time candidate ledger.
+It intentionally ignores test/replay outputs. Post-close rows take precedence
+over formal rows for the same day.
 """
 
 from __future__ import annotations
@@ -447,13 +449,95 @@ def _postclose_rows(next_day_map: dict[date, date]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=OUTPUT_COLUMNS)
 
 
+def _iter_valid_formal_timings() -> list[Path]:
+    by_date: dict[date, Path] = {}
+    for path in sorted(REALTIME_OUTPUT_DIR.glob("realtime_1457_m1457_timing_*.json")):
+        try:
+            timing = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        live = timing.get("live_results") or {}
+        if (timing.get("run_mode") or live.get("run_mode")) != "formal":
+            continue
+        if timing.get("test_mode"):
+            continue
+        if live.get("status") != "ok":
+            continue
+        if live.get("is_formal_valid") is not True:
+            continue
+        if live.get("snapshot_time_status") not in {None, "verified"}:
+            continue
+        selector = timing.get("selector") or {}
+        selector_csv = selector.get("selector_csv") or (timing.get("paths") or {}).get("selector_csv")
+        if not selector_csv or not Path(selector_csv).exists():
+            continue
+        target_ts = pd.to_datetime(timing.get("target_date") or live.get("target_date"), errors="coerce")
+        if pd.isna(target_ts):
+            continue
+        target_date = target_ts.date()
+        previous = by_date.get(target_date)
+        if previous is None or path.stat().st_mtime > previous.stat().st_mtime:
+            by_date[target_date] = path
+    return [by_date[d] for d in sorted(by_date)]
+
+
+def _formal_rows(next_day_map: dict[date, date], exclude_date_keys: set[str]) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for timing_path in _iter_valid_formal_timings():
+        timing = json.loads(timing_path.read_text(encoding="utf-8"))
+        live = timing.get("live_results") or {}
+        selector = timing.get("selector") or {}
+        selector_csv = Path(selector.get("selector_csv") or (timing.get("paths") or {}).get("selector_csv"))
+        target_ts = pd.to_datetime(timing.get("target_date") or live.get("target_date"), errors="coerce")
+        if pd.isna(target_ts):
+            continue
+        signal_date = target_ts.date()
+        if _date_key(signal_date) in exclude_date_keys:
+            continue
+        try:
+            cands = pd.read_csv(selector_csv, encoding="utf-8-sig", dtype=str)
+        except Exception:
+            continue
+        run_id = timing_path.stem.replace("realtime_1457_m1457_timing_", "")
+        output_grade = str(live.get("output_grade") or "")
+        for _, row in cands.iterrows():
+            symbol = str(row.get("symbol", "")).replace(".0", "").zfill(6)
+            probability = pd.to_numeric(row.get("probability"), errors="coerce")
+            entry_price = pd.to_numeric(row.get("latest_price"), errors="coerce")
+            turnover = pd.to_numeric(row.get("turnover_today"), errors="coerce")
+            label_date = next_day_map.get(signal_date) or _infer_next_symbol_date(symbol, signal_date)
+            hit, high_ret, close_ret = _verified_returns(
+                symbol,
+                label_date,
+                float(entry_price) if pd.notna(entry_price) else None,
+            )
+            rows.append({
+                "date": _fmt_date(signal_date),
+                "label_date": _fmt_date(label_date),
+                "symbol": symbol,
+                "name": row.get("name", ""),
+                "probability": round(float(probability), 8) if pd.notna(probability) else "",
+                "hit": hit,
+                "next_high_return_pct": high_ret if high_ret is not None else "",
+                "next_close_return_pct": close_ret if close_ret is not None else "",
+                "close": round(float(entry_price), 2) if pd.notna(entry_price) else "",
+                "鎹㈡墜": round(float(turnover), 6) if pd.notna(turnover) else "",
+                "source": "formal_1457",
+                "run_id": run_id,
+                "output_grade": output_grade,
+            })
+    return pd.DataFrame(rows, columns=OUTPUT_COLUMNS)
+
+
 def update_history() -> pd.DataFrame:
     HISTORY_DIR.mkdir(parents=True, exist_ok=True)
     next_day_map = _load_calendar_next_day()
     base = _load_base_history()
     legacy = _legacy_postclose_rows(next_day_map)
     live = _postclose_rows(next_day_map)
-    combined = pd.concat([base, legacy, live], ignore_index=True)
+    live_date_keys = set(live["date"].map(_date_key).tolist()) if not live.empty else set()
+    formal = _formal_rows(next_day_map, live_date_keys)
+    combined = pd.concat([base, legacy, formal, live], ignore_index=True)
     if combined.empty:
         combined = pd.DataFrame(columns=OUTPUT_COLUMNS)
     for col in OUTPUT_COLUMNS:
@@ -465,6 +549,7 @@ def update_history() -> pd.DataFrame:
         "baseline_batch": 0,
         "baseline_precise_202604": 1,
         "legacy_postclose_1457": 2,
+        "formal_1457": 2,
         "postclose_1457": 3,
     }
     combined["_source_rank"] = combined["source"].map(lambda x: source_rank.get(str(x), 0))

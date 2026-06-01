@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from datetime import date
 from pathlib import Path
 
@@ -52,3 +53,48 @@ def test_postclose_snapshot_calendar_excludes_intraday_misdated_files(tmp_path, 
 
     assert date(2026, 5, 17) not in next_day
     assert next_day == {date(2026, 5, 18): date(2026, 5, 19)}
+
+
+def test_formal_rows_are_used_only_when_postclose_date_is_absent(tmp_path, monkeypatch):
+    history = _load_history_module()
+    monkeypatch.setattr(history, "REALTIME_OUTPUT_DIR", tmp_path)
+
+    selector_path = tmp_path / "realtime_1457_m1457_selector_top6_20260528_141344.csv"
+    pd.DataFrame(
+        {
+            "symbol": ["600707"],
+            "name": ["彩虹股份"],
+            "probability": ["0.7888889"],
+            "latest_price": ["10.87"],
+            "turnover_today": ["8.0"],
+        }
+    ).to_csv(selector_path, index=False, encoding="utf-8-sig")
+    timing_path = tmp_path / "realtime_1457_m1457_timing_20260528_141344.json"
+    timing_path.write_text(
+        json.dumps(
+            {
+                "target_date": "2026-05-28",
+                "run_mode": "formal",
+                "selector": {"selector_csv": str(selector_path)},
+                "live_results": {
+                    "run_mode": "formal",
+                    "status": "ok",
+                    "is_formal_valid": True,
+                    "snapshot_time_status": "verified",
+                    "output_grade": "approximated_1457",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rows = history._formal_rows({}, exclude_date_keys=set())
+
+    assert len(rows) == 1
+    assert rows.iloc[0]["date"] == "2026/5/28"
+    assert rows.iloc[0]["source"] == "formal_1457"
+    assert rows.iloc[0]["run_id"] == "20260528_141344"
+
+    excluded = history._formal_rows({}, exclude_date_keys={"2026-05-28"})
+
+    assert excluded.empty
