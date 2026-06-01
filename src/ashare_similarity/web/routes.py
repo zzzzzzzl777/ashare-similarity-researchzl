@@ -27,6 +27,7 @@ def _static_asset_version() -> str:
     candidates = [
         static_dir / "styles.css",
         static_dir / "app.js",
+        static_dir / "signals.js",
         static_dir / "vendor" / "echarts.min.js",
     ]
     mtimes = [path.stat().st_mtime_ns for path in candidates if path.exists()]
@@ -477,3 +478,88 @@ async def get_view_model(request: Request):
     if service is None:
         raise HTTPException(status_code=500, detail="搜索服务不可用")
     return build_initial_view_model(_resolve_runtime(request))
+
+
+# ── Signal Dashboard Routes ──────────────────────────────────────────────
+
+
+def _resolve_signal_service(request: Request):
+    return getattr(request.app.state, "signal_service", None)
+
+
+def _require_signal_service(request: Request):
+    svc = _resolve_signal_service(request)
+    if svc is None or not svc.is_ready():
+        status = getattr(svc, "_status", "not_built") if svc else "not_built"
+        if status == "manifest_mismatch":
+            raise HTTPException(status_code=503, detail="缓存与冻结候选不匹配，请 force rebuild")
+        raise HTTPException(status_code=503, detail="信号缓存未构建，请先运行 build-signals")
+    return svc
+
+
+def _resolve_name_func(request: Request):
+    runtime = _resolve_runtime(request)
+    data_service = getattr(runtime, "data_service", None)
+    resolver = getattr(data_service, "resolve_symbol_query", None)
+    if not callable(resolver):
+        return lambda _s: ""
+
+    def _resolve(symbol: str) -> str:
+        try:
+            result = resolver(symbol, frequency="daily", prefer_cached=True)
+            if isinstance(result, dict) and result.get("name"):
+                return str(result["name"])
+        except Exception:
+            pass
+        return ""
+
+    return _resolve
+
+
+@router.get("/signals", response_class=HTMLResponse)
+async def signals_page(request: Request):
+    context = {"static_version": _static_asset_version()}
+    return templates.TemplateResponse(request, "signals.html", {"request": request, **context})
+
+
+@router.get("/api/signals/v1/status")
+async def signal_status(request: Request):
+    svc = _resolve_signal_service(request)
+    if svc is None:
+        return {"status": "not_built", "candidates": [], "cache_generated_at": None, "date_range": None, "research_only": True}
+    return svc.get_status()
+
+
+@router.get("/api/signals/v1/dates")
+async def signal_dates(request: Request):
+    svc = _require_signal_service(request)
+    return await run_in_threadpool(svc.get_dates)
+
+
+@router.get("/api/signals/v1/daily")
+async def signal_daily(
+    request: Request,
+    date: str = Query(...),
+    model_tag: str | None = Query(default=None),
+):
+    svc = _require_signal_service(request)
+    return await run_in_threadpool(svc.get_daily_signals, date, model_tag)
+
+
+@router.get("/api/signals/v1/stock")
+async def signal_stock(
+    request: Request,
+    q: str = Query(...),
+    date: str | None = Query(default=None),
+):
+    svc = _require_signal_service(request)
+    runtime = _resolve_runtime(request)
+    symbol = _resolve_symbol_query(runtime, q)
+    resolve_name = _resolve_name_func(request)
+    return await run_in_threadpool(svc.get_stock_signals, symbol, date, resolve_name=resolve_name)
+
+
+@router.get("/api/signals/v1/backtest")
+async def signal_backtest(request: Request):
+    svc = _require_signal_service(request)
+    return await run_in_threadpool(svc.get_backtest_summary)

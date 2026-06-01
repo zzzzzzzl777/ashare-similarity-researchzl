@@ -118,7 +118,7 @@ def _build_parser() -> argparse.ArgumentParser:
     gpu_probe.add_argument("--test-start", required=True)
     gpu_probe.add_argument("--end", required=True)
     gpu_probe.add_argument("--train-rows", type=int, default=300_000)
-    gpu_probe.add_argument("--test-rows", type=int, default=50_000)
+    gpu_probe.add_argument("--test-rows", type=int, default=120_000)
     gpu_probe.add_argument("--seed", type=int, default=42)
     gpu_probe.add_argument("--max-symbols", type=int)
     gpu_probe.add_argument("--epochs", type=int, default=160)
@@ -134,12 +134,22 @@ def _build_parser() -> argparse.ArgumentParser:
     gpu_probe.add_argument("--min-volatility-pct", type=float, default=2.5)
     gpu_probe.add_argument("--min-abnormal-flags", type=int, default=2)
     gpu_probe.add_argument("--min-phase-days-3", type=int, default=2)
+    gpu_probe.add_argument("--min-active-anomaly-rank", type=float, default=0.0)
     gpu_probe.add_argument("--main-board-only", action=argparse.BooleanOptionalAction, default=True)
     gpu_probe.add_argument("--min-label-return-pct", type=float, default=0.0)
+    gpu_probe.add_argument("--label-target", choices=["next_close_up", "next_high_from_close"], default="next_high_from_close")
+    gpu_probe.add_argument("--target-high-return-pct", type=float, default=1.0)
     gpu_probe.add_argument("--feature-set", choices=["legacy", "base", "expanded", "research"], default="expanded")
     gpu_probe.add_argument("--max-selected-features", type=int, default=299)
+    gpu_probe.add_argument("--feature-selection-method", choices=["abs_correlation", "stable_tail"], default="abs_correlation")
+    gpu_probe.add_argument("--candidate-family", choices=["all", "torch", "tree"], default="all")
+    gpu_probe.add_argument("--intraday-factor-frequency", choices=["1", "5", "15", "30", "60"], default="5")
     gpu_probe.add_argument("--feature-cache", action=argparse.BooleanOptionalAction, default=True)
     gpu_probe.add_argument("--refresh-feature-cache", action="store_true")
+    gpu_probe.add_argument("--lockbox-role", choices=["seen_research", "final_unseen"], default="seen_research")
+    gpu_probe.add_argument("--selector-coverage-weight", type=float, default=0.02)
+    gpu_probe.add_argument("--exclude-event-limit-up", action=argparse.BooleanOptionalAction, default=True)
+    gpu_probe.add_argument("--exclude-feature-prefix", nargs="*", default=None, help="Drop features matching any prefix before training (ablation)")
 
     prediction_build_dataset = subparsers.add_parser(
         "prediction-build-dataset",
@@ -192,6 +202,13 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_PORT_SCAN_LIMIT,
         help="首选端口被占用时，继续尝试的端口数量",
     )
+
+    build_signals = subparsers.add_parser(
+        "build-signals",
+        help="离线构建历史回测信号缓存（训练模型、复刻 selector、生成 signal_cache.parquet）",
+    )
+    build_signals.add_argument("--frozen-candidates", default=None, help="Override frozen_candidates JSON path")
+    build_signals.add_argument("--force-rebuild", action="store_true", help="Ignore existing cache, regenerate")
 
     if "train-prediction" in subparsers.choices:
         subparsers.choices["train-prediction"].add_argument("--approved-run-id")
@@ -643,6 +660,23 @@ def handle_maintain(
     print(_serialize(summary))
 
 
+def handle_build_signals(*, frozen_candidates: str | None, force_rebuild: bool) -> None:
+    import logging
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s — %(message)s")
+    from pathlib import Path
+
+    from ashare_similarity.config import get_default_config
+    from ashare_similarity.prediction.signals.cache import build_signal_cache
+    from ashare_similarity.prediction.signals.config import SignalConfig
+
+    config = get_default_config()
+    signal_config = SignalConfig.from_app_config(config)
+    fc_path = Path(frozen_candidates) if frozen_candidates else None
+    result = build_signal_cache(signal_config, frozen_candidates_path=fc_path, force_rebuild=force_rebuild)
+    print(_serialize(result))
+
+
 def handle_status(frequency: str | None = None) -> None:
     runtime = get_runtime()
     print(_serialize(_status_payload_with_index_health(runtime, frequency=frequency)))
@@ -775,12 +809,22 @@ def main() -> None:
                 min_volatility_pct=args.min_volatility_pct,
                 min_abnormal_flags=args.min_abnormal_flags,
                 min_phase_days_3=args.min_phase_days_3,
+                min_active_anomaly_rank=args.min_active_anomaly_rank,
                 main_board_only=args.main_board_only,
                 min_label_return_pct=args.min_label_return_pct,
+                label_target=args.label_target,
+                target_high_return_pct=args.target_high_return_pct,
                 feature_set=args.feature_set,
                 max_selected_features=args.max_selected_features,
+                feature_selection_method=args.feature_selection_method,
+                candidate_family=args.candidate_family,
+                intraday_factor_frequency=args.intraday_factor_frequency,
                 use_feature_cache=args.feature_cache,
                 refresh_feature_cache=args.refresh_feature_cache,
+                lockbox_role=args.lockbox_role,
+                selector_coverage_weight=args.selector_coverage_weight,
+                exclude_event_limit_up=args.exclude_event_limit_up,
+                exclude_feature_prefix=tuple(args.exclude_feature_prefix) if args.exclude_feature_prefix else (),
             )
         )
         return
@@ -857,6 +901,13 @@ def main() -> None:
             resume=bool(args.resume),
             window_sizes=getattr(args, "window_sizes", None) or None,
             skip_rebuild=bool(getattr(args, "skip_rebuild", False)),
+            force_rebuild=bool(getattr(args, "force_rebuild", False)),
+        )
+        return
+
+    if args.command == "build-signals":
+        handle_build_signals(
+            frozen_candidates=getattr(args, "frozen_candidates", None),
             force_rebuild=bool(getattr(args, "force_rebuild", False)),
         )
         return

@@ -10,6 +10,7 @@ import pandas as pd
 from ashare_similarity.config import AppConfig
 from ashare_similarity.data.base import Frequency, SecurityProfile, build_minute_history_notice, to_market_symbol
 from ashare_similarity.data.storage import LocalDataStore
+from ashare_similarity.data.tushare_proxy_client import TsyTushareProxyClient, TsyTushareProxyConfig, suggest_time_window
 
 
 class AkshareDataProvider:
@@ -19,6 +20,7 @@ class AkshareDataProvider:
     def __init__(self, config: AppConfig, store: LocalDataStore) -> None:
         self.config = config
         self.store = store
+        self._tsy_client: TsyTushareProxyClient | None = None
 
     def get_frequency_notice(self, frequency: Frequency):
         if frequency == "daily":
@@ -190,6 +192,53 @@ class AkshareDataProvider:
             except Exception as exc:
                 errors.append(f"{loader.__name__}: {exc}")
         raise RuntimeError(f"Unable to fetch minute bars for {symbol} {frequency}: {' | '.join(errors)}")
+
+    def _get_tsy_client(self) -> TsyTushareProxyClient | None:
+        if self._tsy_client is not None:
+            return self._tsy_client
+        cfg = TsyTushareProxyConfig.from_env()
+        if cfg is None:
+            return None
+        self._tsy_client = TsyTushareProxyClient(cfg)
+        return self._tsy_client
+
+    def _fetch_minute_bars_tushare_proxy(
+        self,
+        *,
+        symbol: str,
+        frequency: Frequency,
+        start_date: date | datetime | None = None,
+        end_date: date | datetime | None = None,
+        adjust: str = "qfq",
+    ) -> pd.DataFrame:
+        del adjust  # tushare minute endpoint does not expose qfq/hfq in `stk_mins`
+        client = self._get_tsy_client()
+        if client is None:
+            return pd.DataFrame()
+        market_symbol = to_market_symbol(symbol)
+        exchange = market_symbol[:2]
+        code = market_symbol[2:]
+        suffix = {"sh": "SH", "sz": "SZ", "bj": "BJ"}.get(exchange, exchange.upper())
+        ts_code = f"{code}.{suffix}"
+        start_ts, end_ts = suggest_time_window(
+            frequency=str(frequency),
+            start_date=start_date,
+            end_date=end_date,
+        )
+        freq = f"{frequency}min"
+        df = client.fetch_stock_mins(ts_code=ts_code, freq=freq, start_date=start_ts, end_date=end_ts)
+        if df.empty:
+            return pd.DataFrame()
+        normalized = df.rename(columns={"trade_time": "timestamp", "vol": "volume"}).copy()
+        normalized["timestamp"] = pd.to_datetime(normalized["timestamp"], errors="coerce")
+        normalized = normalized.dropna(subset=["timestamp"])
+        return self._normalize_minute_frame(
+            normalized,
+            symbol=symbol,
+            frequency=frequency,
+            start_date=start_ts,
+            end_date=end_ts,
+        )
 
     def _fetch_market_index_history_sina(
         self,

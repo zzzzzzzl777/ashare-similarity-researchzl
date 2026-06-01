@@ -1,0 +1,114 @@
+"""Same-N comparison: 2026 Q1 (Jan-Mar), both models rank by RAW probability, take identical top-N."""
+import math, pickle, sys, numpy as np, pandas as pd, pyarrow.parquet as pq, torch
+from pathlib import Path
+
+sys.path.insert(0, str(Path(r"C:\Users\zzzzzzl\Desktop\subagent\src")))
+
+S2_BUNDLE = Path(r"E:\ashare_similarity_runtime\data\reports\prediction\runs\gpu_probe_20260509T002433Z_a0ec8105\model_bundle.pt")
+PHASEC_BUNDLE = Path(r"E:\ashare_similarity_runtime\data\reports\prediction\runs\gpu_probe_20260509T105830Z_12605e2b\model_bundle.pt")
+CACHE = Path(r"E:\ashare_similarity_runtime\data\reports\prediction\feature_cache\gpu_probe_features_31ffa0367a4d893f.parquet")
+
+def wilson(n, p):
+    if n == 0 or p == 0: return 0.0
+    z = 1.96
+    denom = 1 + z**2 / n
+    center = p + z**2 / (2 * n)
+    margin = z * math.sqrt(p * (1 - p) / n + z**2 / (4 * n**2))
+    return (center - margin) / denom
+
+def load_bundle(path):
+    b = torch.load(str(path), map_location="cpu", weights_only=False)
+    members = [pickle.loads(m["model_bytes"]) for m in b["members"]]
+    iso = pickle.loads(b["iso_model_bytes"]) if b.get("iso_model_bytes") else None
+    return {"members": members, "mean": b["mean"], "std": b["std"],
+            "selected_indices": b["selected_indices"],
+            "feature_names": list(b["feature_names"]), "iso_model": iso,
+            "calibration_used": b["calibration_used"]}
+
+def run_inference(bundle, df):
+    fnames = bundle["feature_names"]
+    raw = np.zeros((len(df), len(fnames)), dtype=np.float32)
+    for i, f in enumerate(fnames):
+        if f in df.columns:
+            raw[:, i] = df[f].fillna(0).values.astype(np.float32)
+    x = torch.as_tensor(raw, dtype=torch.float32)
+    std = bundle["std"].clone(); std[std == 0] = 1.0
+    x = (x - bundle["mean"]) / std
+    if bundle["selected_indices"] is not None:
+        x = x[:, bundle["selected_indices"]]
+    x_np = x.numpy()
+    probs = np.stack([m.predict_proba(x_np)[:, 1].astype(np.float32) for m in bundle["members"]], axis=0)
+    return probs.mean(axis=0)
+
+s2 = load_bundle(S2_BUNDLE)
+pc = load_bundle(PHASEC_BUNDLE)
+
+all_f = set(s2["feature_names"]) | set(pc["feature_names"]) | {"symbol","date","close","actual","limit_up_like","short_phase_days_3"}
+schema_cols = set(pq.read_schema(str(CACHE)).names)
+data = pd.read_parquet(str(CACHE), columns=[c for c in all_f if c in schema_cols])
+
+# Split Q1 into monthly
+for month_name, d_start, d_end in [
+    ("2026-01 January",  "2026-01-01", "2026-01-31"),
+    ("2026-02 February", "2026-02-01", "2026-02-28"),
+    ("2026-03 March",    "2026-03-01", "2026-03-31"),
+    ("2026 Q1 Full",     "2026-01-01", "2026-03-31"),
+]:
+    window = data[(data["date"] >= d_start) & (data["date"] <= d_end)].copy()
+    window = window[(window["limit_up_like"] != 1) & (window["short_phase_days_3"] >= 1)]
+    if len(window) == 0:
+        continue
+
+    s2_raw = run_inference(s2, window)
+    pc_raw = run_inference(pc, window)
+    actual = window["actual"].values
+    dates = window["date"].values
+
+    print(f"\n{'=' * 75}")
+    print(f"  {month_name}: {len(window):,} rows, {window['date'].nunique()} days, pos_rate={actual.mean():.4f}")
+    print(f"{'=' * 75}")
+
+    print(f"\n  GLOBAL TOP-N (raw prob)")
+    print(f"  {'N':>6}  {'S2_Acc':>7} {'S2_W95':>7}  {'PC_Acc':>7} {'PC_W95':>7}  {'Delta':>7} {'Winner':>7}")
+    print(f"  {'-'*62}")
+    for n in [100, 200, 300, 500, 700, 1000, 1500, 2000, 3000, 5000]:
+        if n > len(actual):
+            continue
+        s2_idx = np.argsort(-s2_raw)[:n]
+        pc_idx = np.argsort(-pc_raw)[:n]
+        s2_acc = actual[s2_idx].mean()
+        pc_acc = actual[pc_idx].mean()
+        s2_w = wilson(n, s2_acc)
+        pc_w = wilson(n, pc_acc)
+        delta = pc_acc - s2_acc
+        w = "S2" if s2_acc > pc_acc else ("PC" if pc_acc > s2_acc else "tie")
+        print(f"  {n:>6}  {s2_acc:>7.4f} {s2_w:>7.4f}  {pc_acc:>7.4f} {pc_w:>7.4f}  {delta:>+7.4f} {w:>7}")
+
+    print(f"\n  DAILY TOP-K (raw prob)")
+    df_tmp = pd.DataFrame({"date": dates, "actual": actual, "s2_raw": s2_raw, "pc_raw": pc_raw})
+    print(f"  {'K':>4} {'Total':>6}  {'S2_Acc':>7} {'S2_W95':>7}  {'PC_Acc':>7} {'PC_W95':>7}  {'Delta':>7} {'Winner':>7}")
+    print(f"  {'-'*62}")
+    for k in [3, 5, 6, 8, 10, 15, 20, 30, 50]:
+        s2_sel = df_tmp.groupby("date").apply(lambda g: g.nlargest(k, "s2_raw"), include_groups=False).reset_index(drop=True)
+        pc_sel = df_tmp.groupby("date").apply(lambda g: g.nlargest(k, "pc_raw"), include_groups=False).reset_index(drop=True)
+        s2_acc = s2_sel["actual"].mean()
+        pc_acc = pc_sel["actual"].mean()
+        n = len(s2_sel)
+        s2_w = wilson(n, s2_acc)
+        pc_w = wilson(n, pc_acc)
+        delta = pc_acc - s2_acc
+        w = "S2" if s2_acc > pc_acc else ("PC" if pc_acc > s2_acc else "tie")
+        print(f"  {k:>4} {n:>6}  {s2_acc:>7.4f} {s2_w:>7.4f}  {pc_acc:>7.4f} {pc_w:>7.4f}  {delta:>+7.4f} {w:>7}")
+
+    # Overlap
+    topn = min(500, len(actual))
+    s2_set = set(np.argsort(-s2_raw)[:topn])
+    pc_set = set(np.argsort(-pc_raw)[:topn])
+    both = s2_set & pc_set
+    s2_only_idx = np.array(list(s2_set - pc_set))
+    pc_only_idx = np.array(list(pc_set - s2_set))
+    print(f"\n  Top-{topn} overlap: {len(both)}/{topn} = {len(both)/topn:.1%}")
+    if len(s2_only_idx) > 0:
+        print(f"  S2-only acc: {actual[s2_only_idx].mean():.4f}  PC-only acc: {actual[pc_only_idx].mean():.4f}")
+
+print("\nDone.")

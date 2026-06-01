@@ -1,0 +1,100 @@
+{
+  "schema_version": "frozen_forward_config_v2",
+  "status": "champion_candidate_frozen_bundle",
+  "selection_policy": "fixed_recent_36m rolling, multi-seed, stability first; Q1/April excluded from model selection",
+  "frozen_at": "2026-05-14T19:06:33+08:00",
+  "champion_variant": "pre_new_A_engineerable_control",
+  "challenger_variant": "family_drop_intraday_volume_structure",
+  "frozen_run_id": "gpu_probe_20260514T110633Z_e763ec32",
+  "frozen_artifact_path": "E:\\ashare_similarity_runtime\\data\\reports\\prediction\\runs\\gpu_probe_20260514T110633Z_e763ec32",
+  "model_bundle_path": "E:\\ashare_similarity_runtime\\data\\reports\\prediction\\runs\\gpu_probe_20260514T110633Z_e763ec32\\model_bundle.pt",
+  "feature_cache_path": "E:\\ashare_similarity_runtime\\data\\reports\\prediction\\feature_cache\\gpu_probe_features_10c11fc874db003c.parquet",
+  "score_only_summary_path": "E:\\ashare_similarity_runtime\\data\\reports\\prediction\\next_round_1457_existing_bundle_scores_summary_20260514_pre_new_A_freeze_v4_scoreonly.json",
+
+  "split": {
+    "fit_train_start": "2023-01-01",
+    "fit_train_end": "2025-12-31",
+    "blocked_from_training": "2026-01-01 to 2026-04-30",
+    "first_forward_observation_start": "2026-05-06",
+    "first_forward_observation_end": "2026-05-11",
+    "label_target": "next_high_from_close",
+    "target_high_return_pct": 1.0
+  },
+
+  "model": {
+    "model_name": "stacking_average_top3",
+    "model_kind": "ensemble_average",
+    "members": [
+      "gpu_xgboost_hist_deep",
+      "catboost_cpu_fallback_compact",
+      "lightgbm_cpu_stable_wide"
+    ],
+    "post_calibration": "isotonic",
+    "threshold": 0.5,
+    "seed": 42,
+    "selected_feature_count": 260,
+    "full_feature_count": 763,
+    "feature_selection_method": "stable_tail",
+    "max_selected_features": 260,
+    "selector_coverage_weight": 0.02
+  },
+
+  "sample_filter": {
+    "main_board_only": true,
+    "short_only": true,
+    "min_turnover": 3.0,
+    "min_amount": 200000000,
+    "min_volume_z": 1.0,
+    "min_amount_z": 1.0,
+    "min_range_pct": 3.0,
+    "min_volatility_pct": 2.5,
+    "min_phase_days_3": 1,
+    "min_abnormal_flags": 2,
+    "exclude_event_limit_up": true,
+    "exclude_feature_prefix": ["cross_"]
+  },
+
+  "selection_evidence": {
+    "tier7_report": "C:\\Users\\zzzzzzl\\Desktop\\subagent\\docs\\next_round_1457_tier7_top2_seed42_seed7_seed2026_stability.md",
+    "pre_new_A_3seed_mean_wilson95": 0.782220,
+    "pre_new_A_3seed_min_wilson95": 0.713268,
+    "pre_new_A_3seed_std_wilson95": 0.034187,
+    "pre_new_A_3seed_mean_accuracy": 0.803175,
+    "drop_intraday_volume_3seed_mean_wilson95": 0.783020,
+    "drop_intraday_volume_3seed_min_wilson95": 0.698737,
+    "decision": "pre_new_A wins stability-first; drop_intraday_volume remains challenger because its seed2026 2023Q3 tail collapsed below 0.70 Wilson."
+  },
+
+  "score_only_checks": {
+    "q1_seen_research_pge075_count": 5271,
+    "q1_seen_research_pge075_accuracy": 0.801935,
+    "q1_seen_research_pge075_wilson95": 0.790958,
+    "april_seen_research_pge075_count": 717,
+    "april_seen_research_pge075_accuracy": 0.768480,
+    "april_seen_research_pge075_wilson95": 0.736224,
+    "may_partial_forward_pge075_count": 40,
+    "may_partial_forward_pge075_accuracy": 0.800000,
+    "may_partial_forward_pge075_wilson95": 0.652427,
+    "missing_feature_count": 0,
+    "missing_selected_feature_count": 0
+  },
+
+  "fingerprints": {
+    "code_hash": "23ab8d3325bb53ca",
+    "feature_hash": "caa96ecae05ab532",
+    "data_hash": "2aae4905cd6b6a2f",
+    "split_hash": "e64cd77cfdf44bf5",
+    "selector_config_hash": "09e63e1db0272c7f"
+  },
+
+  "gate_status": {
+    "freeze_bundle_p0": 0,
+    "freeze_bundle_p1": 0,
+    "bundle_self_validation_passed": true,
+    "p0_selected_count": 0,
+    "backend": "gpu",
+    "python_executable_contains": ".venv5090",
+    "first_may_forward_acceptance": "not_passed_sample_too_small_and_lockbox_reused_after_warning-clean_rerun",
+    "final_forward_pass_required": "A future unseen window after this config must be scored without changing model, features, threshold, calibration, or selected feature order."
+  }
+}

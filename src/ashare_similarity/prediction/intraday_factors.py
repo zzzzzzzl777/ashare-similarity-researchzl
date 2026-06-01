@@ -3,6 +3,81 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from ashare_similarity.prediction.factor_cache_manager import FactorFrame
+
+
+INTRADAY_FACTOR_COLUMNS: tuple[str, ...] = (
+    "minute_intraday_return",
+    "minute_last_30min_return",
+    "minute_last_30min_vs_day",
+    "minute_price_1430_return",
+    "minute_late_surge_ratio",
+    "minute_late_surge_lure_risk",
+    "minute_last_5min_return",
+    "minute_last_30min_volume_ratio",
+    "minute_first_15min_return",
+    "minute_first_15min_volume_ratio",
+    "minute_midday_return",
+    "minute_afternoon_start_return",
+    "minute_closing_auction_volume_ratio",
+    "minute_vwap_deviation_eod",
+    "minute_high_point_time",
+    "minute_low_point_time",
+    "minute_intraday_close_position",
+    "minute_volume_distribution_skew",
+    "minute_volume_entropy",
+    "minute_volume_gini",
+    "minute_price_volume_corr_intraday",
+    "minute_return_autocorr_intraday",
+    "minute_realized_volatility_5min",
+    "minute_realized_skew",
+    "minute_realized_kurtosis",
+    "minute_intraday_trend_strength",
+    "minute_steady_intraday_rise_score",
+    "minute_morning_afternoon_imbalance",
+    "minute_up_volume_ratio",
+    "minute_intraday_vol_herfindahl",
+    "minute_intraday_profit_ratio",
+    "minute_vwap_deviation_normalized",
+    "minute_intraday_volume_clustering",
+    "minute_intraday_ofi_proxy",
+    "minute_close_impact_3min",
+    "minute_eod_volume_concentration",
+    "minute_trapped_volume",
+    "minute_tail_volatility_ratio",
+    "minute_intraday_price_reversal",
+    "minute_bar_obi_proxy",
+    "minute_intraday_consolidation_duration",
+    "minute_intraday_breakout_bar_ratio",
+    "minute_intraday_volume_shrink_ratio",
+    "minute_prev_30min_volume_ratio",
+)
+
+
+def build_intraday_factor_frame(minute_bars: pd.DataFrame) -> FactorFrame:
+    factors = build_intraday_daily_factors(minute_bars)
+    if factors.empty:
+        frame = pd.DataFrame(columns=["symbol", "date", *INTRADAY_FACTOR_COLUMNS])
+    else:
+        rename = {
+            column: f"minute_{column}"
+            for column in factors.columns
+            if column not in {"symbol", "date"}
+        }
+        frame = factors.rename(columns=rename)
+        for column in INTRADAY_FACTOR_COLUMNS:
+            if column not in frame.columns:
+                frame[column] = 0.0
+        frame = frame.loc[:, ["symbol", "date", *INTRADAY_FACTOR_COLUMNS]]
+    return FactorFrame(
+        name="intraday_structure",
+        frame=frame,
+        columns=INTRADAY_FACTOR_COLUMNS,
+        source="cached_minute_bars",
+        asof_time="after_close",
+        lag_rule="T-day minute bars up to close only; usable for T+1 prediction.",
+    )
+
 
 def build_intraday_daily_factors(minute_bars: pd.DataFrame) -> pd.DataFrame:
     if minute_bars.empty or "timestamp" not in minute_bars.columns:
@@ -62,11 +137,37 @@ def build_intraday_daily_factors(minute_bars: pd.DataFrame) -> pd.DataFrame:
         avg_bar_volume = total_volume / max(float(len(group)), 1.0)
         intraday_return = _pct(day_close, day_open)
         last_30min_return = _pct(day_close, last_open)
+        price_1430 = _price_at_or_before(group, "14:30")
+        price_1430_return = _pct(day_close, price_1430) if price_1430 is not None else 0.0
+        late_surge_ratio = _safe_div(day_close - (price_1430 if price_1430 is not None else last_open), day_close - day_open)
         minute_returns = group["close"].astype(float).pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
         minute_return_pct = minute_returns * 100.0
         volumes = group["volume"].fillna(0.0).astype(float) if "volume" in group.columns else pd.Series(0.0, index=group.index)
         price_volume_corr = _safe_corr(minute_return_pct.to_numpy(), volumes.to_numpy())
         positive_volume = float(volumes[minute_returns > 0.0].sum())
+        closes = group["close"].astype(float)
+        highs = group["high"].astype(float)
+        lows = group["low"].astype(float)
+        volume_values = volumes.to_numpy(dtype=float)
+        close_values = closes.to_numpy(dtype=float)
+        high_values = highs.to_numpy(dtype=float)
+        low_values = lows.to_numpy(dtype=float)
+        running_amount = group["amount"].fillna(0.0).astype(float).cumsum()
+        running_volume = volumes.cumsum()
+        running_vwap = (running_amount / running_volume.replace(0.0, np.nan)).ffill().fillna(day_close)
+        running_vwap_values = running_vwap.to_numpy(dtype=float)
+        price_std = float(np.nanstd(close_values))
+        avg_volume = float(np.nanmean(volume_values)) if len(volume_values) else 0.0
+        total_volume_safe = max(total_volume, 1e-12)
+        volume_share = volume_values / total_volume_safe
+        last_6_returns = minute_returns.tail(6).to_numpy(dtype=float)
+        first_half = group.iloc[: max(1, len(group) // 2)]
+        first_half_return = _pct(float(first_half["close"].iloc[-1]), float(first_half["open"].iloc[0])) if not first_half.empty else 0.0
+        abs_return_sum = float(np.abs(minute_return_pct.to_numpy(dtype=float)).sum())
+        bar_spread = np.maximum(high_values - low_values, 1e-12)
+        bar_close_position = (close_values - low_values) / bar_spread
+        decays = np.power(0.97, np.arange(len(group) - 1, -1, -1, dtype=float))
+        trapped_mask = running_vwap_values > close_values
         rows.append(
             {
                 "symbol": str(symbol).zfill(6) if symbol is not None else None,
@@ -74,6 +175,9 @@ def build_intraday_daily_factors(minute_bars: pd.DataFrame) -> pd.DataFrame:
                 "intraday_return": intraday_return,
                 "last_30min_return": last_30min_return,
                 "last_30min_vs_day": last_30min_return / max(abs(intraday_return), 0.05),
+                "price_1430_return": price_1430_return,
+                "late_surge_ratio": late_surge_ratio,
+                "late_surge_lure_risk": float(intraday_return > 0.0 and late_surge_ratio > 0.50),
                 "last_5min_return": _pct(day_close, last_5_open),
                 "last_30min_volume_ratio": last_volume / avg_30m_volume if avg_30m_volume > 0 else 0.0,
                 "first_15min_return": _pct(first_15_close, first_15_open),
@@ -98,21 +202,59 @@ def build_intraday_daily_factors(minute_bars: pd.DataFrame) -> pd.DataFrame:
                 "realized_skew": _series_skew(minute_return_pct.to_numpy()),
                 "realized_kurtosis": _series_kurtosis(minute_return_pct.to_numpy()),
                 "intraday_trend_strength": abs(intraday_return) / max(float(np.abs(minute_return_pct).sum()), 0.05),
+                "steady_intraday_rise_score": max(intraday_return, 0.0) / max(float(np.abs(minute_return_pct).sum()), 0.05)
+                * max(0.0, 1.0 - max(late_surge_ratio - 0.50, 0.0)),
                 "morning_afternoon_imbalance": _morning_afternoon_imbalance(group, volumes),
                 "up_volume_ratio": positive_volume / total_volume if total_volume > 0 else 0.0,
+                "intraday_vol_herfindahl": float(np.square(volume_share).sum()),
+                "intraday_profit_ratio": float(volume_values[close_values > running_vwap_values].sum() / total_volume_safe),
+                "vwap_deviation_normalized": _safe_div(day_close - vwap, price_std),
+                "intraday_volume_clustering": _safe_div(float(np.nanmax(volume_values)) if len(volume_values) else 0.0, avg_volume),
+                "intraday_ofi_proxy": float(np.sign(minute_returns.to_numpy(dtype=float)) @ volume_values / total_volume_safe),
+                "close_impact_3min": _pct(day_close, float(close_values[-2])) if len(close_values) >= 2 else 0.0,
+                "eod_volume_concentration": float(volume_values[-1] / total_volume_safe) if len(volume_values) else 0.0,
+                "trapped_volume": float((volume_values * trapped_mask.astype(float) * decays).sum() / total_volume_safe),
+                "tail_volatility_ratio": _safe_div(float(np.nanstd(last_6_returns)), float(np.nanstd(minute_returns.to_numpy(dtype=float)))),
+                "intraday_price_reversal": abs(first_half_return) / max(abs_return_sum, 0.05),
+                "bar_obi_proxy": float(((bar_close_position - 0.5) * volume_values).sum() / total_volume_safe),
+                "intraday_consolidation_duration": float(
+                    np.mean(np.abs(close_values - running_vwap_values) / np.maximum(running_vwap_values, 1e-12) < 0.003)
+                ),
+                "intraday_breakout_bar_ratio": float(
+                    np.mean((close_values > running_vwap_values * 1.005) & (volume_values > avg_volume * 1.5))
+                ),
+                "intraday_volume_shrink_ratio": float(np.mean(volume_values < avg_volume * 0.6)) if avg_volume > 0 else 0.0,
+                "prev_30min_volume_ratio": float(
+                    _clock_window(group, start="14:00", end="14:30")["volume"].fillna(0.0).astype(float).sum()
+                    / total_volume_safe
+                )
+                if "volume" in group.columns
+                else 0.0,
             }
         )
     return pd.DataFrame(rows)
 
 
 def _last_minutes(group: pd.DataFrame, *, minutes: int) -> pd.DataFrame:
-    cutoff = group["timestamp"].iloc[-1] - pd.Timedelta(minutes=minutes)
-    return group[group["timestamp"] >= cutoff]
+    if len(group) <= 1:
+        return group
+    diffs = group["timestamp"].diff().dropna()
+    bar_interval_min = diffs.median().total_seconds() / 60.0
+    if bar_interval_min <= 0:
+        return group
+    n_bars = max(1, round(minutes / bar_interval_min))
+    return group.iloc[-min(n_bars, len(group)):]
 
 
 def _first_minutes(group: pd.DataFrame, *, minutes: int) -> pd.DataFrame:
-    cutoff = group["timestamp"].iloc[0] + pd.Timedelta(minutes=minutes)
-    return group[group["timestamp"] <= cutoff]
+    if len(group) <= 1:
+        return group
+    diffs = group["timestamp"].diff().dropna()
+    bar_interval_min = diffs.median().total_seconds() / 60.0
+    if bar_interval_min <= 0:
+        return group
+    n_bars = max(1, round(minutes / bar_interval_min))
+    return group.iloc[:min(n_bars, len(group))]
 
 
 def _clock_window(group: pd.DataFrame, *, start: str, end: str) -> pd.DataFrame:
@@ -128,6 +270,14 @@ def _window_return(group: pd.DataFrame) -> float:
     return _pct(float(group["close"].iloc[-1]), float(group["open"].iloc[0]))
 
 
+def _price_at_or_before(group: pd.DataFrame, clock_time: str) -> float | None:
+    cutoff = pd.Timestamp(clock_time).time()
+    subset = group[group["timestamp"].dt.time <= cutoff]
+    if subset.empty:
+        return None
+    return float(subset["close"].iloc[-1])
+
+
 def _session_minutes(group: pd.DataFrame) -> float:
     if len(group) <= 1:
         return 1.0
@@ -138,6 +288,12 @@ def _pct(value: float, base: float) -> float:
     if abs(base) < 1e-12:
         return 0.0
     return (value / base - 1.0) * 100.0
+
+
+def _safe_div(value: float, base: float) -> float:
+    if abs(base) < 1e-12:
+        return 0.0
+    return value / base
 
 
 def _close_position(close: float, high: float, low: float) -> float:
